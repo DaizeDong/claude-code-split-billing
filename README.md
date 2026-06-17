@@ -26,6 +26,8 @@ subscription quota.
 
 ## How it works
 
+![Architecture diagram](docs/architecture.svg)
+
 Claude Code makes two kinds of network requests that go to **different destinations**:
 
 | Traffic | Destination | Goes through `ANTHROPIC_BASE_URL`? |
