@@ -2,7 +2,8 @@
 # Choose which Claude Code config directory `cc` uses, and turn on Remote Control.
 #
 # Modes:
-#   (default)            Isolated config dir at <repo>\.claude-config — independent of ~/.claude.
+#   (no switch)          You are prompted whether to enable inherit (shared) mode.
+#   -Isolated            Isolated config dir at <repo>\.claude-config — independent of ~/.claude.
 #                        You log in separately under `cc`; nothing is shared.
 #   -Inherit [Dir]       Reuse your real Claude Code config (Dir, default $env:USERPROFILE\.claude)
 #                        so `cc` and `claude` SHARE login, plugins, skills, sessions, MCP and
@@ -13,11 +14,25 @@
 
 param(
   [switch]$Inherit,
+  [switch]$Isolated,
   [string]$ConfigDir
 )
 $ErrorActionPreference = 'Stop'
 
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+
+# No explicit mode given: ask interactively, else default to isolated.
+if (-not $Inherit -and -not $Isolated -and -not $ConfigDir) {
+  if ([Environment]::UserInteractive) {
+    Write-Host "Choose how 'cc' stores its Claude Code config:"
+    Write-Host "  isolated (default) - separate .claude-config; you log in under 'cc', nothing shared"
+    Write-Host "  shared  (inherit)  - reuse your real ~/.claude; share login/plugins/skills/sessions"
+    $ans = Read-Host "Enable inherit (shared) mode? [y/N]"
+    if ($ans -match '^(y|yes)$') { $Inherit = $true }
+  } else {
+    Write-Host "No mode switch and not interactive - defaulting to isolated (use -Inherit to share ~/.claude)." -ForegroundColor Yellow
+  }
+}
 
 if (-not $ConfigDir) {
   if ($Inherit) { $ConfigDir = Join-Path $env:USERPROFILE '.claude' }

@@ -3,7 +3,8 @@
 # Choose which Claude Code config directory `cc` uses, and turn on Remote Control.
 #
 # Modes:
-#   (default / --isolated)   Isolated config dir at <repo>/.claude-config — fully independent
+#   (no flag)                You are prompted whether to enable inherit (shared) mode.
+#   --isolated               Isolated config dir at <repo>/.claude-config — fully independent
 #                            of your normal ~/.claude. You log in separately under `cc`; no
 #                            plugins/skills/sessions are shared.
 #   --inherit [DIR]          Reuse your real Claude Code config (DIR, default ~/.claude) so that
@@ -18,7 +19,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-MODE=isolated
+MODE=""
 INHERIT_DIR=""
 POSITIONAL=""
 while [ $# -gt 0 ]; do
@@ -33,6 +34,24 @@ while [ $# -gt 0 ]; do
     *) POSITIONAL="$1"; shift ;;
   esac
 done
+
+# No explicit mode given: ask interactively, else default to isolated.
+if [ -z "$MODE" ]; then
+  if [ -t 0 ]; then
+    echo "Choose how 'cc' stores its Claude Code config:"
+    echo "  isolated (default) - separate .claude-config; you log in under 'cc', nothing shared"
+    echo "  shared  (inherit)  - reuse your real ~/.claude; share login/plugins/skills/sessions"
+    printf "Enable inherit (shared) mode? [y/N] "
+    read -r ans || ans=""
+    case "$ans" in
+      [Yy]|[Yy][Ee][Ss]) MODE=inherit ;;
+      *) MODE=isolated ;;
+    esac
+  else
+    MODE=isolated
+    echo "No mode flag and not interactive - defaulting to isolated (use --inherit to share ~/.claude)."
+  fi
+fi
 
 if [ "$MODE" = inherit ]; then
   CONFIG_DIR="${INHERIT_DIR:-$HOME/.claude}"

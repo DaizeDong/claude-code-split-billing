@@ -160,24 +160,33 @@ launcher picks it up automatically if present.
 ### 3. Choose a config directory + enable Remote Control
 
 `setup-config.sh` records which Claude Code config directory `cc` uses (in the git-ignored
-`.cc-config-dir`) and turns on Remote Control. Pick one of two modes:
+`.cc-config-dir`) and turns on Remote Control. Run it with **no flag** and it **asks you which
+mode to use**; pass a flag to choose non-interactively.
+
+- **Windows:** `powershell -ExecutionPolicy Bypass -File scripts\setup-config.ps1`
+- **macOS/Linux:** `scripts/setup-config.sh`
+
+```
+Enable inherit (shared) mode? [y/N]
+```
+
+Answer **N** (or pass `--isolated` / `-Isolated`) for **isolated** mode, or **y** (or pass
+`--inherit` / `-Inherit`) for **shared** mode. In a non-interactive shell it defaults to isolated.
 
 **Isolated (default)** — a separate config/credentials directory at `.claude-config/`, fully
 independent of your normal `~/.claude`. You log in separately under `cc`; plugins, skills and
 sessions are **not** shared.
 
-- **Windows:** `powershell -ExecutionPolicy Bypass -File scripts\setup-config.ps1`
-- **macOS/Linux:** `scripts/setup-config.sh`
-
-**Shared (`--inherit`)** — reuse your real `~/.claude` so `cc` and `claude` share **everything
+**Shared (inherit)** — reuse your real `~/.claude` so `cc` and `claude` share **everything
 live**: login, plugins, skills, sessions, MCP servers and settings. Only inference billing
 differs (`cc` → gateway, `claude` → subscription). If `~/.claude` is already OAuth-logged-in,
 `cc` needs no separate `/login`. This writes one key (`enableRemoteControlByDefault`) into
-`~/.claude/settings.json`; all other keys are preserved. (Linux/macOS:)
+`~/.claude/settings.json`; all other keys are preserved. To skip the prompt:
 
 ```bash
 scripts/setup-config.sh --inherit            # share ~/.claude
 scripts/setup-config.sh --inherit /path/dir  # or share a specific config dir
+scripts/setup-config.sh --isolated           # force isolated, no prompt
 ```
 
 > Trade-off: in `--inherit` mode `cc` does read/write your real `~/.claude`. That's the point —
