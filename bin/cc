@@ -7,6 +7,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# --- resolve a Node.js >= 18 for the local proxy ---
+# Claude Code bundles its own runtime; this is only for src/proxy.js + ensure-proxy.js.
+# Override by exporting NODE_BIN=/path/to/node (useful when the default `node` is too old,
+# e.g. a system/conda Node 12). Otherwise we try `node` then common install locations.
+node_major() { "$1" -e 'process.stdout.write(process.versions.node.split(".")[0])' 2>/dev/null; }
+resolve_node() {
+  local c m
+  for c in ${NODE_BIN:+"$NODE_BIN"} node \
+           "$HOME"/.nvm/versions/node/*/bin/node \
+           /usr/local/bin/node /opt/homebrew/bin/node /usr/bin/node; do
+    command -v "$c" >/dev/null 2>&1 || [ -x "$c" ] || continue
+    m="$(node_major "$c")" || continue
+    if [ -n "$m" ] && [ "$m" -ge 18 ] 2>/dev/null; then printf '%s' "$c"; return 0; fi
+  done
+  return 1
+}
+if ! NODE_BIN="$(resolve_node)"; then
+  echo "cc: need Node.js >= 18 to run the local proxy." >&2
+  echo "    Install Node >= 18, or export NODE_BIN=/path/to/node and retry." >&2
+  exit 1
+fi
+
 # --- isolated config (does not touch your default ~/.claude.json) ---
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$REPO_ROOT/.claude-config}"
 
@@ -25,7 +47,8 @@ if [ -f "$REPO_ROOT/ca-bundle.pem" ]; then
 fi
 
 # --- make sure the rerouting proxy is running; start it if not ---
-node "$REPO_ROOT/src/ensure-proxy.js"
+# ensure-proxy.js spawns proxy.js via process.execPath, so it inherits this same Node.
+"$NODE_BIN" "$REPO_ROOT/src/ensure-proxy.js"
 
 # --- launch claude with all passed-through args (RC on by default via settings.json) ---
 exec claude "$@"

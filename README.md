@@ -76,7 +76,9 @@ The local proxy decides what to do with each request as follows:
 ## Requirements
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed and on your `PATH`.
-- Node.js ≥ 18.
+- Node.js ≥ 18 for the local proxy (Claude Code itself bundles its own runtime). If the
+  default `node` on your `PATH` is older (e.g. a system/conda Node 12), install a newer one
+  or point the launcher at it with `export NODE_BIN=/path/to/node`.
 - A Claude **Pro/Max subscription** (for OAuth login + Remote Control).
 - A reachable **Anthropic-compatible inference gateway** and whatever credentials it needs.
 
@@ -246,6 +248,7 @@ annotated template.
 | Remote Control still doesn't appear | Confirm the isolated `settings.json` has `enableRemoteControlByDefault: true` and you logged in with OAuth (not an API key). |
 | `HTTP 400` missing a required header | Your gateway needs a header you didn't inject. Add it to `GATEWAY_HEADERS`. |
 | `FATAL: GATEWAY_HOST is not set` | Copy `.env.example` to `.env` and fill in `GATEWAY_HOST`. |
+| `cc: need Node.js >= 18 …` | The `node` on your `PATH` is too old. Install Node ≥ 18, or `export NODE_BIN=/path/to/a/newer/node`. |
 
 ---
 
