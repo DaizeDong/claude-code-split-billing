@@ -8,6 +8,9 @@ ca-bundle.pem
 # Isolated Claude Code config holds OAuth credentials — never commit
 .claude-config/
 
+# Records which config dir cc uses (may be a personal absolute path)
+.cc-config-dir
+
 # Logs
 *.log
 proxy.log

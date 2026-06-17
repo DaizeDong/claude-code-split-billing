@@ -1,11 +1,28 @@
 # setup-config.ps1  (Windows / PowerShell)
-# Create an isolated Claude Code config directory and turn on Remote Control by default.
-# This directory is independent of your default ~/.claude.json — they do not affect each other.
+# Choose which Claude Code config directory `cc` uses, and turn on Remote Control.
+#
+# Modes:
+#   (default)            Isolated config dir at <repo>\.claude-config — independent of ~/.claude.
+#                        You log in separately under `cc`; nothing is shared.
+#   -Inherit [Dir]       Reuse your real Claude Code config (Dir, default $env:USERPROFILE\.claude)
+#                        so `cc` and `claude` SHARE login, plugins, skills, sessions, MCP and
+#                        settings live. Only inference billing differs. Writes one key
+#                        (enableRemoteControlByDefault) into Dir\settings.json; others preserved.
+#
+# The chosen directory is recorded in <repo>\.cc-config-dir (git-ignored), which bin\cc.cmd reads.
 
 param(
-  [string]$ConfigDir = (Join-Path (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)) '.claude-config')
+  [switch]$Inherit,
+  [string]$ConfigDir
 )
 $ErrorActionPreference = 'Stop'
+
+$repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+
+if (-not $ConfigDir) {
+  if ($Inherit) { $ConfigDir = Join-Path $env:USERPROFILE '.claude' }
+  else          { $ConfigDir = Join-Path $repo '.claude-config' }
+}
 
 New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
 $sf = Join-Path $ConfigDir 'settings.json'
@@ -18,7 +35,17 @@ if ($j.PSObject.Properties.Name -contains 'enableRemoteControlByDefault') {
 }
 ($j | ConvertTo-Json -Depth 20) | Out-File -Encoding utf8 $sf
 
-Write-Host "Isolated config dir: $ConfigDir" -ForegroundColor Green
-Write-Host "settings.json:"
-Get-Content $sf -Raw
-Write-Host "`nNext: run 'cc' then /login and choose the subscription (OAuth) option."
+# Record the chosen dir so bin\cc.cmd uses it (git-ignored; may contain a personal path).
+$ConfigDir | Out-File -Encoding ascii -NoNewline (Join-Path $repo '.cc-config-dir')
+
+if ($Inherit) {
+  Write-Host "Mode: inherit (shared)" -ForegroundColor Green
+  Write-Host "Config dir cc uses: $ConfigDir"
+  Write-Host "cc now SHARES this config with your normal 'claude' (login, plugins, skills,"
+  Write-Host "sessions, MCP, settings). Only inference billing differs."
+  Write-Host "Added enableRemoteControlByDefault to $sf (existing keys preserved)."
+} else {
+  Write-Host "Mode: isolated" -ForegroundColor Green
+  Write-Host "Config dir cc uses: $ConfigDir"
+  Write-Host "`nNext: run 'cc' then /login and choose the subscription (OAuth) option."
+}

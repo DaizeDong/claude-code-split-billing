@@ -6,7 +6,9 @@ setlocal
 set "SCRIPT_DIR=%~dp0"
 set "REPO_ROOT=%SCRIPT_DIR%.."
 
-REM --- isolated config (does not touch your default ~/.claude.json) ---
+REM --- config dir: pointer written by setup-config (isolated default, or your real ~/.claude
+REM     in --inherit mode). An explicit CLAUDE_CONFIG_DIR in the environment always wins. ---
+if not defined CLAUDE_CONFIG_DIR if exist "%REPO_ROOT%\.cc-config-dir" set /p CLAUDE_CONFIG_DIR=<"%REPO_ROOT%\.cc-config-dir"
 if not defined CLAUDE_CONFIG_DIR set "CLAUDE_CONFIG_DIR=%REPO_ROOT%\.claude-config"
 
 REM --- ensure OAuth auth (an api key/token would disable Remote Control) ---
@@ -26,7 +28,9 @@ REM --- trust corporate TLS root so Node reaches the control plane (only if bund
 if exist "%REPO_ROOT%\ca-bundle.pem" set "NODE_EXTRA_CA_CERTS=%REPO_ROOT%\ca-bundle.pem"
 
 REM --- make sure the rerouting proxy is running; start it if not ---
-node "%REPO_ROOT%\src\ensure-proxy.js"
+REM     Set NODE_BIN to a Node >= 18 if the default `node` on PATH is too old.
+if not defined NODE_BIN set "NODE_BIN=node"
+"%NODE_BIN%" "%REPO_ROOT%\src\ensure-proxy.js"
 
 REM --- launch claude with all passed-through args (RC on by default via settings.json) ---
 claude %*

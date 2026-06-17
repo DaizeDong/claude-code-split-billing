@@ -157,13 +157,31 @@ If all hosts report OK, **skip to step 3**. If you see
 Both write `ca-bundle.pem` to the repo root and re-run the connectivity test. The
 launcher picks it up automatically if present.
 
-### 3. Create the isolated config + enable Remote Control
+### 3. Choose a config directory + enable Remote Control
 
-This keeps a separate config/credentials directory so it never touches your default
-`~/.claude.json`.
+`setup-config.sh` records which Claude Code config directory `cc` uses (in the git-ignored
+`.cc-config-dir`) and turns on Remote Control. Pick one of two modes:
+
+**Isolated (default)** — a separate config/credentials directory at `.claude-config/`, fully
+independent of your normal `~/.claude`. You log in separately under `cc`; plugins, skills and
+sessions are **not** shared.
 
 - **Windows:** `powershell -ExecutionPolicy Bypass -File scripts\setup-config.ps1`
 - **macOS/Linux:** `scripts/setup-config.sh`
+
+**Shared (`--inherit`)** — reuse your real `~/.claude` so `cc` and `claude` share **everything
+live**: login, plugins, skills, sessions, MCP servers and settings. Only inference billing
+differs (`cc` → gateway, `claude` → subscription). If `~/.claude` is already OAuth-logged-in,
+`cc` needs no separate `/login`. This writes one key (`enableRemoteControlByDefault`) into
+`~/.claude/settings.json`; all other keys are preserved. (Linux/macOS:)
+
+```bash
+scripts/setup-config.sh --inherit            # share ~/.claude
+scripts/setup-config.sh --inherit /path/dir  # or share a specific config dir
+```
+
+> Trade-off: in `--inherit` mode `cc` does read/write your real `~/.claude`. That's the point —
+> shared state — but it's no longer isolated. Use the default mode if you want them separate.
 
 ### 4. Put the launcher on your PATH
 

@@ -29,8 +29,18 @@ if ! NODE_BIN="$(resolve_node)"; then
   exit 1
 fi
 
-# --- isolated config (does not touch your default ~/.claude.json) ---
-export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$REPO_ROOT/.claude-config}"
+# --- config dir ---
+# setup-config.sh records the chosen dir in .cc-config-dir: an isolated dir by default, or
+# your real ~/.claude in --inherit mode (shared login/plugins/skills/sessions/MCP/settings).
+# An explicit CLAUDE_CONFIG_DIR in the environment always wins.
+if [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then
+  if [ -f "$REPO_ROOT/.cc-config-dir" ]; then
+    CLAUDE_CONFIG_DIR="$(cat "$REPO_ROOT/.cc-config-dir")"
+  else
+    CLAUDE_CONFIG_DIR="$REPO_ROOT/.claude-config"
+  fi
+fi
+export CLAUDE_CONFIG_DIR
 
 # --- ensure OAuth auth (an api key/token would disable Remote Control) ---
 unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_CUSTOM_HEADERS \
