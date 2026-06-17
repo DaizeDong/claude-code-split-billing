@@ -1,0 +1,17 @@
+# Secrets and environment
+.env
+
+# Certificate bundles are environment-specific and may be sensitive
+*.pem
+ca-bundle.pem
+
+# Isolated Claude Code config holds OAuth credentials — never commit
+.claude-config/
+
+# Logs
+*.log
+proxy.log
+proxy-stdout.log
+
+# Node
+node_modules/

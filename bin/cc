@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Claude Code via a custom inference gateway, with Remote Control still working.
+# Isolated config + local rerouting proxy + (optional) corporate CA trust.
+# All args are forwarded to claude, e.g.:  cc --resume   |   cc --dangerously-skip-permissions
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# --- isolated config (does not touch your default ~/.claude.json) ---
+export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$REPO_ROOT/.claude-config}"
+
+# --- ensure OAuth auth (an api key/token would disable Remote Control) ---
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_CUSTOM_HEADERS \
+      ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
+      ANTHROPIC_DEFAULT_HAIKU_MODEL 2>/dev/null || true
+
+# --- inference -> local proxy -> gateway ---
+PROXY_PORT="${PROXY_PORT:-8787}"
+export ANTHROPIC_BASE_URL="http://127.0.0.1:${PROXY_PORT}"
+
+# --- trust corporate TLS root so Node reaches the control plane (only if bundle exists) ---
+if [ -f "$REPO_ROOT/ca-bundle.pem" ]; then
+  export NODE_EXTRA_CA_CERTS="$REPO_ROOT/ca-bundle.pem"
+fi
+
+# --- make sure the rerouting proxy is running; start it if not ---
+node "$REPO_ROOT/src/ensure-proxy.js"
+
+# --- launch claude with all passed-through args (RC on by default via settings.json) ---
+exec claude "$@"
