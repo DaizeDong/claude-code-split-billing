@@ -42,13 +42,24 @@ if (-not $ConfigDir) {
 New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
 $sf = Join-Path $ConfigDir 'settings.json'
 
-if (Test-Path $sf) { $j = Get-Content $sf -Raw | ConvertFrom-Json } else { $j = [pscustomobject]@{} }
-if ($j.PSObject.Properties.Name -contains 'enableRemoteControlByDefault') {
-  $j.enableRemoteControlByDefault = $true
+# Merge enableRemoteControlByDefault:true without clobbering other keys.
+# Prefer Node: Windows PowerShell's Get-Content/Out-File mangle non-ASCII (e.g. Chinese)
+# settings and add a BOM. Node reads/writes UTF-8 without a BOM, matching setup-config.sh.
+if (Get-Command node -ErrorAction SilentlyContinue) {
+  $env:SF = $sf
+  & node -e "const fs=require('fs');const p=process.env.SF;let j={};try{j=JSON.parse(fs.readFileSync(p,'utf8'))}catch{}; j.enableRemoteControlByDefault=true; fs.writeFileSync(p, JSON.stringify(j,null,2)+'\n');"
 } else {
-  $j | Add-Member -NotePropertyName enableRemoteControlByDefault -NotePropertyValue $true
+  # No Node: UTF-8-safe read + write without BOM.
+  if (Test-Path $sf) { $j = [System.IO.File]::ReadAllText($sf, [System.Text.Encoding]::UTF8) | ConvertFrom-Json }
+  else               { $j = [pscustomobject]@{} }
+  if ($j.PSObject.Properties.Name -contains 'enableRemoteControlByDefault') {
+    $j.enableRemoteControlByDefault = $true
+  } else {
+    $j | Add-Member -NotePropertyName enableRemoteControlByDefault -NotePropertyValue $true
+  }
+  $json = $j | ConvertTo-Json -Depth 20
+  [System.IO.File]::WriteAllText($sf, $json, (New-Object System.Text.UTF8Encoding($false)))
 }
-($j | ConvertTo-Json -Depth 20) | Out-File -Encoding utf8 $sf
 
 # Record the chosen dir so bin\cc.cmd uses it (git-ignored; may contain a personal path).
 $ConfigDir | Out-File -Encoding ascii -NoNewline (Join-Path $repo '.cc-config-dir')
