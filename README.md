@@ -10,6 +10,10 @@ subscription quota.
 - A small local proxy reroutes inference requests (`POST /v1/messages*`) to **your
   gateway**, so per-token inference is billed there, **not** against your subscription.
 
+<p align="center">
+  <img src="docs/architecture.svg" alt="Architecture: subscription Remote Control stays on while inference is billed to a custom gateway" width="100%">
+</p>
+
 ---
 
 ## ⚠️ Disclaimer
@@ -25,8 +29,6 @@ subscription quota.
 ---
 
 ## How it works
-
-![Architecture diagram](docs/architecture.svg)
 
 Claude Code makes two kinds of network requests that go to **different destinations**:
 
@@ -48,18 +50,11 @@ Key insights:
    auth headers and, optionally, remapping the model id) and forwards everything else to
    the Anthropic control plane.
 
-```
-  Claude Code (OAuth login, no ANTHROPIC_API_KEY)
-     |  inference request carries Authorization: Bearer <oauth>
-     v
-  local proxy (127.0.0.1:8787)
-     |- POST /v1/messages*  -> rewrite -> https://<GATEWAY_HOST><BASE_PATH>/v1/messages
-     |      - strip client Authorization / x-api-key
-     |      - inject your gateway headers (auth, user/tenant, ...)
-     |      - optionally remap the model id
-     |      ==> inference billed to your gateway
-     `- everything else (incl. HEAD/GET probes) -> 200 locally / control plane passthrough
-```
+The local proxy decides what to do with each request as follows:
+
+<p align="center">
+  <img src="docs/request-flow.svg" alt="Per-request decision flow: probes answered locally, inference rewritten to the gateway, everything else passed through to the control plane" width="80%">
+</p>
 
 ### Two gotchas this kit handles for you
 

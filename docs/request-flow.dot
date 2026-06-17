@@ -1,0 +1,39 @@
+// Per-request decision flow for the local proxy.
+// Render:  dot -Tsvg docs/request-flow.dot -o docs/request-flow.svg
+digraph request_flow {
+  rankdir=TB;
+  bgcolor="white";
+  fontname="Helvetica";
+  labelloc="t";
+  fontsize=18;
+  label=<<b>Request rewrite flow</b><br/><font point-size="10">how the local proxy decides what to do with each request</font><br/> >;
+
+  node [fontname="Helvetica", fontsize=11];
+  edge [fontname="Helvetica", fontsize=10, penwidth=1.4];
+
+  start [label=<<b>Incoming request</b><br/><font point-size="9">from Claude Code via ANTHROPIC_BASE_URL</font>>,
+         shape=box, style="rounded,filled", fillcolor="#eef2ff", color="#6366f1", penwidth=1.6];
+
+  d1 [label=<HEAD/GET on &quot;/&quot; ?<br/><font point-size="9">base-URL reachability probe</font>>,
+      shape=diamond, style="filled", fillcolor="#fff7ed", color="#ea580c", penwidth=1.6];
+  probe [label=<<b>Answer 200 locally</b><br/><font point-size="9">never sent upstream</font>>,
+         shape=box, style="rounded,filled", fillcolor="#ffedd5", color="#ea580c", penwidth=1.6];
+
+  d2 [label=<POST /v1/messages* ?<br/><font point-size="9">inference call</font>>,
+      shape=diamond, style="filled", fillcolor="#fffbeb", color="#ca8a04", penwidth=1.6];
+
+  inf [label=<<b>Inference rewrite</b><br align="left"/><font point-size="9">- strip Authorization / x-api-key<br align="left"/>- inject GATEWAY_HEADERS<br align="left"/>- optional model remap (GATEWAY_MODEL_MAP)<br align="left"/>- prepend GATEWAY_BASE_PATH<br align="left"/></font>>,
+       shape=box, style="rounded,filled", fillcolor="#fef9c3", color="#ca8a04", penwidth=1.6];
+  gw [label=<<b>Forward to your gateway</b><br/><font point-size="9">tokens billed here</font>>,
+      shape=cylinder, style="filled", fillcolor="#fef9c3", color="#ca8a04", penwidth=1.6];
+
+  pass [label=<<b>Pass through unchanged</b><br/><font point-size="9">api.anthropic.com</font><br/><font point-size="9">OAuth · Remote Control · feature flags</font>>,
+        shape=box, style="rounded,filled", fillcolor="#dcfce7", color="#16a34a", penwidth=1.6];
+
+  start -> d1;
+  d1 -> probe [label="yes", color="#ea580c", fontcolor="#c2410c"];
+  d1 -> d2 [label="no"];
+  d2 -> inf [label="yes", color="#ca8a04", fontcolor="#a16207"];
+  inf -> gw [color="#ca8a04", penwidth=2.2];
+  d2 -> pass [label="no", color="#16a34a", fontcolor="#15803d"];
+}

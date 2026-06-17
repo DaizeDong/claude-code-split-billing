@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1280px; height: 640px; }
+  body {
+    font-family: "Segoe UI", Helvetica, Arial, sans-serif;
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 55%, #312e81 100%);
+    color: #f8fafc;
+    padding: 56px 64px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .top { display: flex; flex-direction: column; gap: 18px; }
+  h1 { font-size: 60px; font-weight: 800; letter-spacing: -1.5px; }
+  h1 .accent { color: #a5b4fc; }
+  .tagline { font-size: 27px; color: #cbd5e1; font-weight: 400; max-width: 1050px; line-height: 1.35; }
+  .chips { display: flex; gap: 14px; margin-top: 10px; flex-wrap: wrap; }
+  .chip {
+    font-size: 21px; font-weight: 600; padding: 10px 20px; border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.18);
+  }
+  .chip.amber  { background: rgba(202,138,4,.20);  color: #fde68a; border-color: rgba(202,138,4,.5); }
+  .chip.green  { background: rgba(22,163,74,.20);   color: #bbf7d0; border-color: rgba(22,163,74,.5); }
+  .chip.blue   { background: rgba(2,132,199,.20);   color: #bae6fd; border-color: rgba(2,132,199,.5); }
+  .flow {
+    display: flex; align-items: center; gap: 18px; font-size: 22px; font-weight: 600;
+    flex-wrap: nowrap;
+  }
+  .node {
+    background: rgba(255,255,255,.06); border: 1.5px solid rgba(255,255,255,.22);
+    border-radius: 14px; padding: 16px 22px; line-height: 1.25; text-align: center;
+  }
+  .node small { display: block; font-size: 15px; font-weight: 400; color: #94a3b8; margin-top: 4px; }
+  .node.gw  { border-color: #ca8a04; background: rgba(202,138,4,.14); }
+  .node.ctl { border-color: #16a34a; background: rgba(22,163,74,.14); }
+  .arrow { color: #94a3b8; font-size: 26px; }
+  .branch { display: flex; flex-direction: column; gap: 12px; }
+  .footer { font-size: 20px; color: #94a3b8; display: flex; justify-content: space-between; align-items: center; }
+  .footer .repo { color: #e2e8f0; font-weight: 600; }
+</style>
+</head>
+<body>
+  <div class="top">
+    <h1>claude-code-<span class="accent">split-billing</span></h1>
+    <div class="tagline">
+      Keep Claude Code's <b>Remote Control</b> (subscription / OAuth) while routing
+      <b>inference</b> to a custom gateway &mdash; so token usage is billed separately
+      from your subscription quota.
+    </div>
+    <div class="chips">
+      <span class="chip amber">inference &rarr; your gateway</span>
+      <span class="chip green">control plane &rarr; Anthropic</span>
+      <span class="chip blue">Remote Control stays on</span>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="node">Claude Code<small>OAuth · no API key</small></div>
+    <span class="arrow">&rarr;</span>
+    <div class="node">Local proxy<small>127.0.0.1:8787</small></div>
+    <span class="arrow">&rarr;</span>
+    <div class="branch">
+      <div class="node gw">Your gateway<small>tokens billed here</small></div>
+      <div class="node ctl">Anthropic control plane<small>OAuth · Remote Control</small></div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span class="repo">github.com/DaizeDong/claude-code-split-billing</span>
+    <span>MIT · Node.js · Windows / macOS / Linux</span>
+  </div>
+</body>
+</html>
