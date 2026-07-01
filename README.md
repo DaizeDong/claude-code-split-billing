@@ -138,21 +138,30 @@ bash scripts/gen-certs.sh          # --force to regenerate
 Writes `certs/{ca,server}.{key,pem}` and copies the CA to `ca-bundle.pem` (what the
 launcher feeds Node via `NODE_EXTRA_CA_CERTS`). All git-ignored.
 
-### 3. Hijack api.anthropic.com to the local proxy (Administrator)
+### 3. Hijack api.anthropic.com to the local proxy (admin / root)
 
+**Windows** (elevated PowerShell):
 ```powershell
-# Windows, elevated PowerShell:
 powershell -ExecutionPolicy Bypass -File scripts\hosts-hijack.ps1 enable
 powershell -ExecutionPolicy Bypass -File scripts\hosts-hijack.ps1 status
 ```
 
-Adds `127.0.0.1  api.anthropic.com  # cc-split-billing` to the hosts file (tagged so it
-can be removed cleanly) and flushes DNS. `disable` reverts it. On macOS/Linux edit
-`/etc/hosts` with the same tagged line.
+**macOS / Linux:**
+```bash
+sudo scripts/hosts-hijack.sh enable
+scripts/hosts-hijack.sh status
+```
 
-> If the write fails with *"being used by another process"*, an AV/VPN/DNS tool is holding
-> the hosts file. The script retries with a shared handle; if it still fails, edit the file
-> manually (keep the `# cc-split-billing` tag) and run `ipconfig /flushdns`.
+Adds `127.0.0.1  api.anthropic.com  # cc-split-billing` to the hosts file (tagged for
+clean removal) and flushes DNS. `disable` reverts it.
+
+> **macOS / Linux:** port 443 is privileged there (Windows isn't), so the proxy needs one
+> extra one-time step — see [Port 443 on macOS/Linux](#port-443-on-macos--linux) below,
+> before your first `cc`.
+>
+> **Windows:** if the hosts write fails with *"being used by another process"*, an AV/VPN/DNS
+> tool is holding the file. The script retries with a shared handle; if it still fails, edit
+> the file manually (keep the `# cc-split-billing` tag) and run `ipconfig /flushdns`.
 
 ### 4. Choose a config directory + enable Remote Control
 
@@ -185,6 +194,38 @@ Run `/login` → **subscription (claude.ai)** → complete OAuth. (In `--inherit
   "Couldn't verify Remote Control eligibility".
 - Open `claude.ai/code` (or the mobile app) on the same account and confirm the session
   appears and is controllable.
+
+---
+
+## Port 443 on macOS / Linux
+
+The proxy must listen on **443** (the RC check requires the base-URL host with no port, so
+traffic always hits 443). Windows lets a normal user bind 443; macOS and Linux do not.
+Pick one approach before first launch:
+
+- **Linux — grant Node the capability (one-time, recommended):**
+  ```bash
+  sudo setcap 'cap_net_bind_service=+ep' "$(command -v node)"
+  ```
+  Then use `cc` normally — it starts the proxy as your user. Re-run after a Node upgrade.
+  (Note: this grants the capability to that `node` binary generally.)
+
+- **Any Unix — run the proxy as root once per boot:**
+  ```bash
+  sudo -E PROXY_PORT=443 node src/proxy.js >> proxy-stdout.log 2>&1 &
+  ```
+  `cc`'s `ensure-proxy` sees it already listening and skips spawning. `-E` preserves your
+  environment; the proxy reads the rest from `.env`.
+
+- **macOS — redirect 443 → a high port with pf (no root proxy):**
+  ```bash
+  echo "rdr pass on lo0 inet proto tcp from any to 127.0.0.1 port 443 -> 127.0.0.1 port 8443" \
+    | sudo pfctl -ef -
+  PROXY_PORT=8443 cc     # proxy binds 8443; the client still reaches 443 via hosts + pf
+  ```
+
+If the proxy can't bind, `cc` fails fast with a pointer back to this section (it won't
+launch `claude` against a dead proxy).
 
 ---
 

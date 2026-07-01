@@ -74,7 +74,8 @@ HOSTS_FILE="${HOSTS_FILE:-/c/Windows/System32/drivers/etc/hosts}"
 if ! grep -q "cc-split-billing" "$HOSTS_FILE" 2>/dev/null; then
   echo "cc: api.anthropic.com is NOT hijacked to 127.0.0.1." >&2
   echo "    Enable it once (Administrator/root):" >&2
-  echo "      Windows: powershell -ExecutionPolicy Bypass -File scripts/hosts-hijack.ps1 enable" >&2
+  echo "      Windows:     powershell -ExecutionPolicy Bypass -File scripts/hosts-hijack.ps1 enable" >&2
+  echo "      macOS/Linux: sudo scripts/hosts-hijack.sh enable" >&2
   exit 1
 fi
 

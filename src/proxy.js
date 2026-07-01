@@ -227,6 +227,21 @@ server.on('upgrade', async (req, socket, head) => {
   socket.on('error', () => up.destroy());
 });
 
+server.on('error', (e) => {
+  if (e.code === 'EACCES') {
+    console.error(`FATAL: cannot bind ${HOST}:${PORT} (permission denied).`);
+    console.error('Port 443 is privileged on macOS/Linux. Options:');
+    console.error('  Linux:  sudo setcap "cap_net_bind_service=+ep" "$(command -v node)"   then relaunch cc');
+    console.error('  any:    run the proxy as root once:  sudo -E node src/proxy.js');
+    console.error('  or redirect 443 -> a high port (see README "Port 443 on macOS/Linux").');
+  } else if (e.code === 'EADDRINUSE') {
+    console.error(`FATAL: ${HOST}:${PORT} already in use (another proxy? IIS? Skype? a stale node?).`);
+  } else {
+    console.error('FATAL: proxy server error:', String(e));
+  }
+  process.exit(1);
+});
+
 server.listen(PORT, HOST, () => {
   log(`HTTPS proxy listening on https://${HOST}:${PORT}  (terminating ${CONTROL_HOST})`);
   log(`inference -> https://${GATEWAY_HOST}${GATEWAY_BASE_PATH}/v1/messages  (billed to your gateway)`);

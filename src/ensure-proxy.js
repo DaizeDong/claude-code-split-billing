@@ -23,7 +23,25 @@ const startProxy = () => {
     windowsHide: true,
   });
   child.unref();
-  setTimeout(() => process.exit(0), 600); // give it a moment to bind
+  // Verify it actually bound. On macOS/Linux, port 443 is privileged and the spawn
+  // may die immediately with EACCES — catch that here instead of launching claude
+  // against a dead proxy.
+  setTimeout(() => {
+    const check = net.connect({ host: HOST, port: PORT });
+    check.setTimeout(600);
+    const fail = () => {
+      check.destroy();
+      console.error(`ensure-proxy: proxy did not come up on ${HOST}:${PORT}.`);
+      if (process.platform !== 'win32' && PORT < 1024) {
+        console.error('Port 443 is privileged on macOS/Linux — see README "Port 443 on macOS/Linux".');
+      }
+      console.error('See proxy-stdout.log for the underlying error.');
+      process.exit(1);
+    };
+    check.on('connect', () => { check.destroy(); process.exit(0); });
+    check.on('timeout', fail);
+    check.on('error', fail);
+  }, 700);
 };
 
 sock.on('timeout', () => { sock.destroy(); startProxy(); });
