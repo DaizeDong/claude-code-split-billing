@@ -20,12 +20,29 @@ set "ANTHROPIC_DEFAULT_OPUS_MODEL="
 set "ANTHROPIC_DEFAULT_SONNET_MODEL="
 set "ANTHROPIC_DEFAULT_HAIKU_MODEL="
 
-REM --- inference -> local proxy -> gateway ---
-if not defined PROXY_PORT set "PROXY_PORT=8787"
-set "ANTHROPIC_BASE_URL=http://127.0.0.1:%PROXY_PORT%"
+REM --- MITM mode: point the client at the REAL host so Remote Control's
+REM     host===api.anthropic.com check passes; hosts hijack + local HTTPS proxy
+REM     (self-signed leaf) reroute /v1/messages to the gateway. ---
+if not defined PROXY_PORT set "PROXY_PORT=443"
+set "ANTHROPIC_BASE_URL=https://api.anthropic.com"
 
-REM --- trust corporate TLS root so Node reaches the control plane (only if bundle exists) ---
-if exist "%REPO_ROOT%\ca-bundle.pem" set "NODE_EXTRA_CA_CERTS=%REPO_ROOT%\ca-bundle.pem"
+REM --- trust the local CA that signs our api.anthropic.com leaf (required). ---
+if exist "%REPO_ROOT%\ca-bundle.pem" (
+  set "NODE_EXTRA_CA_CERTS=%REPO_ROOT%\ca-bundle.pem"
+) else (
+  echo cc: missing ca-bundle.pem. Run:  bash scripts/gen-certs.sh
+  exit /b 1
+)
+
+REM --- verify the hosts hijack is active, else RC traffic goes to the real host
+REM     directly and inference won't be rerouted. ---
+findstr /c:"cc-split-billing" "%WINDIR%\System32\drivers\etc\hosts" >nul 2>&1
+if errorlevel 1 (
+  echo cc: api.anthropic.com is NOT hijacked to 127.0.0.1.
+  echo     Run once from an elevated PowerShell:
+  echo       powershell -ExecutionPolicy Bypass -File "%REPO_ROOT%\scripts\hosts-hijack.ps1" enable
+  exit /b 1
+)
 
 REM --- make sure the rerouting proxy is running; start it if not ---
 REM     Set NODE_BIN to a Node >= 18 if the default `node` on PATH is too old.

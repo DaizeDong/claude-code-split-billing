@@ -7,7 +7,7 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 
-const PORT = Number(process.env.PROXY_PORT || 8787);
+const PORT = Number(process.env.PROXY_PORT || 443);
 const HOST = process.env.PROXY_HOST || '127.0.0.1';
 const REPO_ROOT = path.join(__dirname, '..');
 

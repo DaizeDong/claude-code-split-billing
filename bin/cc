@@ -54,13 +54,28 @@ unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_CUSTOM_HEADERS \
       ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
       ANTHROPIC_DEFAULT_HAIKU_MODEL 2>/dev/null || true
 
-# --- inference -> local proxy -> gateway ---
-PROXY_PORT="${PROXY_PORT:-8787}"
-export ANTHROPIC_BASE_URL="http://127.0.0.1:${PROXY_PORT}"
+# --- MITM mode: point the client at the REAL host so Remote Control's
+#     host===api.anthropic.com check passes; hosts hijack + local HTTPS proxy
+#     (self-signed leaf) reroute /v1/messages to the gateway. ---
+export PROXY_PORT="${PROXY_PORT:-443}"
+export ANTHROPIC_BASE_URL="https://api.anthropic.com"
 
-# --- trust corporate TLS root so Node reaches the control plane (only if bundle exists) ---
+# --- trust the local CA that signs our api.anthropic.com leaf (required). ---
 if [ -f "$REPO_ROOT/ca-bundle.pem" ]; then
   export NODE_EXTRA_CA_CERTS="$REPO_ROOT/ca-bundle.pem"
+else
+  echo "cc: missing ca-bundle.pem. Run:  bash scripts/gen-certs.sh" >&2
+  exit 1
+fi
+
+# --- verify the hosts hijack is active (Windows path shown; on *nix check /etc/hosts). ---
+HOSTS_FILE="${HOSTS_FILE:-/c/Windows/System32/drivers/etc/hosts}"
+[ -f "$HOSTS_FILE" ] || HOSTS_FILE=/etc/hosts
+if ! grep -q "cc-split-billing" "$HOSTS_FILE" 2>/dev/null; then
+  echo "cc: api.anthropic.com is NOT hijacked to 127.0.0.1." >&2
+  echo "    Enable it once (Administrator/root):" >&2
+  echo "      Windows: powershell -ExecutionPolicy Bypass -File scripts/hosts-hijack.ps1 enable" >&2
+  exit 1
 fi
 
 # --- make sure the rerouting proxy is running; start it if not ---

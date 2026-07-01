@@ -1,9 +1,11 @@
 # Secrets and environment
 .env
 
-# Certificate bundles are environment-specific and may be sensitive
+# Certificate bundles / keys are environment-specific and sensitive
 *.pem
+*.key
 ca-bundle.pem
+certs/
 
 # Isolated Claude Code config holds OAuth credentials — never commit
 .claude-config/

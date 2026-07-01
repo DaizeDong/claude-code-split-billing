@@ -10,6 +10,15 @@ subscription quota.
 - A small local proxy reroutes inference requests (`POST /v1/messages*`) to **your
   gateway**, so per-token inference is billed there, **not** against your subscription.
 
+> **⚠️ Architecture changed (MITM mode).** Recent Claude Code releases (≥ 2.1.197) gate
+> Remote Control on a hard check: `new URL(ANTHROPIC_BASE_URL).host === "api.anthropic.com"`.
+> Pointing the client at a local proxy URL (the old `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`
+> approach) now **disables Remote Control** ("Remote Control is only available when using
+> Claude via api.anthropic.com"). The only way to keep BOTH is to leave the base URL as the
+> real host and intercept it: **hosts-hijack `api.anthropic.com` → `127.0.0.1` + a local
+> HTTPS proxy with a self-signed leaf** trusted via `NODE_EXTRA_CA_CERTS`. That is what this
+> kit now does. It is a genuine MITM of an official endpoint — read the Disclaimer.
+
 <p align="center">
   <img src="docs/architecture.svg" alt="Architecture: subscription Remote Control stays on while inference is billed to a custom gateway" width="100%">
 </p>
@@ -21,8 +30,14 @@ subscription quota.
 - Your subscription fee is still due. Its role is reduced to "paying for Remote
   Control". You only save the **per-token inference cost** — worth it only if your
   gateway's tokens are meaningfully cheaper than your subscription's included usage.
-- This relies on undocumented client behavior and sits at the edge of the Terms of
-  Service. A future Claude Code release may break it. **Use at your own risk.**
+- **MITM mode intercepts `api.anthropic.com` system-wide** via the hosts file and a
+  self-signed certificate. While enabled, every program on the machine (browsers, plain
+  `claude`, other SDKs) resolves `api.anthropic.com` to `127.0.0.1`; only this proxy
+  (with the matching cert) serves it correctly. Disable it to restore normal behavior.
+- This relies on undocumented client behavior and **sits well past the edge of the Terms
+  of Service** (impersonating an official host with a self-signed cert). Anthropic is
+  actively tightening this (the RC base-URL check, a hard-disabled bypass switch). A
+  future release may break it at any time. **Use at your own risk.**
 - Provided under the MIT license with no warranty. You are responsible for complying
   with the terms of every service you connect to.
 
@@ -30,57 +45,47 @@ subscription quota.
 
 ## How it works
 
-Claude Code makes two kinds of network requests that go to **different destinations**:
+Claude Code makes two kinds of network requests. Both now go to `api.anthropic.com`
+(because Remote Control requires the base URL's host to be exactly that), so we
+intercept that host locally and split by path:
 
-| Traffic | Destination | Goes through `ANTHROPIC_BASE_URL`? |
+| Traffic | Path | Where the proxy sends it |
 |---|---|---|
-| **Inference** `POST /v1/messages*` | decided by `ANTHROPIC_BASE_URL` | ✅ yes → we hijack this |
-| **Control plane** (OAuth refresh, Remote Control register/poll, feature-flag eligibility, `claude.ai` MCP) | fixed Anthropic hosts | ❌ no → passes through untouched |
+| **Inference** | `POST /v1/messages*` | your gateway (billed there); auth headers injected, model id optionally remapped |
+| **Control plane** (OAuth, Remote Control sessions/bridge/heartbeat, feature flags, MCP registry) | everything else | the **real** `api.anthropic.com` |
 
-Key insights:
+Key mechanics:
 
-1. **Remote Control is gated on the *auth type*, not the base URL.** As long as you log
-   in with OAuth (and do **not** set `ANTHROPIC_API_KEY`), Remote Control stays
-   eligible even after you change `ANTHROPIC_BASE_URL`. Setting an API key is what
-   disables it.
-2. **The control plane talks to Anthropic directly**, so the local proxy only needs to
-   handle inference and can pass everything else straight through.
-3. Therefore the whole solution is: **one** OAuth-logged-in Claude Code + **one** local
-   reverse proxy that rewrites `/v1/messages` to your gateway (injecting the gateway's
-   auth headers and, optionally, remapping the model id) and forwards everything else to
-   the Anthropic control plane.
+1. **Remote Control is gated on `new URL(ANTHROPIC_BASE_URL).host === "api.anthropic.com"`**
+   — a pure string check (it does not verify IP or certificate fingerprint). So we set
+   `ANTHROPIC_BASE_URL=https://api.anthropic.com` to pass it.
+2. **The hosts file redirects `api.anthropic.com` → `127.0.0.1`**, so that traffic reaches
+   the local proxy instead of the real host.
+3. **The local proxy terminates TLS** with a self-signed leaf for `api.anthropic.com`,
+   signed by a local CA that Node trusts via `NODE_EXTRA_CA_CERTS`.
+4. **Reaching the real upstream without a loop:** the proxy resolves the real
+   `api.anthropic.com` IP with `dns.resolve4()` (which queries real DNS servers and
+   ignores the hosts file), then connects to that IP with `servername`/`Host` =
+   `api.anthropic.com`.
+5. `OAuth` login (no `ANTHROPIC_API_KEY`) is still required — an API key would disable RC
+   independently of the base URL.
 
-The local proxy decides what to do with each request as follows:
-
-<p align="center">
-  <img src="docs/request-flow.svg" alt="Per-request decision flow: probes answered locally, inference rewritten to the gateway, everything else passed through to the control plane" width="80%">
-</p>
-
-### Two gotchas this kit handles for you
-
-- **Node may not trust your network's TLS-intercepting root CA.** Some corporate
-  networks man-in-the-middle HTTPS with their own root CA. Windows/macOS may trust it,
-  but **Node ships its own trust store and won't by default**, so reaching the control
-  plane fails with `unable to get local issuer certificate`. The eligibility check then
-  fails and `--remote-control` is silently ignored
-  ("Couldn't verify Remote Control eligibility"). Fix: export the corporate root CA to a
-  PEM and feed it to Node via `NODE_EXTRA_CA_CERTS` (see `scripts/setup-ca.*`). **If your
-  network does not intercept TLS, you can skip this entirely.**
-- **`--remote-control` is a launch flag, not a slash command.** Typing
-  `/remote-control` in a session returns "Unknown command". This kit enables it via
-  `enableRemoteControlByDefault: true` in an isolated `settings.json`, so you never need
-  the flag.
+The proxy answers the client's `HEAD /` reachability probe locally, sends
+`POST /v1/messages*` to the gateway, tunnels WebSocket upgrades (if any) to the real host,
+and forwards everything else (including SSE streams like `worker/events/stream`) to the
+real control plane.
 
 ---
 
 ## Requirements
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed and on your `PATH`.
-- Node.js ≥ 18 for the local proxy (Claude Code itself bundles its own runtime). If the
-  default `node` on your `PATH` is older (e.g. a system/conda Node 12), install a newer one
-  or point the launcher at it with `export NODE_BIN=/path/to/node`.
-- A Claude **Pro/Max subscription** (for OAuth login + Remote Control).
-- A reachable **Anthropic-compatible inference gateway** and whatever credentials it needs.
+- Node.js ≥ 18 for the local proxy (Claude Code bundles its own runtime). Override with
+  `export NODE_BIN=/path/to/node` if the default `node` is too old.
+- **openssl** on `PATH` (to generate the local CA + leaf). Git Bash ships one on Windows.
+- Ability to **edit the hosts file as Administrator/root**, and to **bind port 443**.
+- A Claude **Pro/Max subscription** (OAuth login + Remote Control).
+- A reachable **Anthropic-compatible inference gateway** and its credentials.
 
 ---
 
@@ -88,27 +93,26 @@ The local proxy decides what to do with each request as follows:
 
 ```
 claude-code-split-billing/
-├── README.md
-├── LICENSE
-├── .gitignore
-├── .env.example              # template for gateway config — copy to .env
-├── package.json
 ├── src/
-│   ├── proxy.js              # the reverse proxy: inference -> gateway, rest -> control plane
+│   ├── proxy.js              # HTTPS proxy: TLS-terminates api.anthropic.com,
+│   │                         #   /v1/messages -> gateway, rest -> real anthropic
 │   └── ensure-proxy.js       # idempotent: starts the proxy only if not already running
 ├── bin/
-│   ├── cc.cmd                # Windows launcher wrapping `claude`
-│   └── cc                    # macOS/Linux launcher wrapping `claude`
+│   ├── cc.cmd / cc           # launchers wrapping `claude` (Windows / *nix)
 ├── config/
 │   └── settings.example.json # enableRemoteControlByDefault: true
-└── scripts/
-    ├── setup-config.ps1 / .sh   # create the isolated config dir + enable Remote Control
-    ├── setup-ca.ps1 / .sh       # (optional) export corporate root CA for Node to trust
-    └── test-control-plane.js    # TLS reachability check for the control-plane hosts
+├── scripts/
+│   ├── gen-certs.sh          # generate local CA + api.anthropic.com leaf (openssl)
+│   ├── hosts-hijack.ps1      # enable/disable/status the api.anthropic.com -> 127.0.0.1 redirect
+│   ├── setup-config.ps1 / .sh   # create/choose the config dir + enable Remote Control
+│   ├── setup-ca.ps1 / .sh       # (optional) also trust a corporate root CA
+│   └── test-control-plane.js    # TLS reachability check
+├── certs/                    # generated CA + leaf + keys (git-ignored)
+└── .env.example              # gateway config template — copy to .env
 ```
 
-Generated/secret files are git-ignored: `.env`, `ca-bundle.pem`, `*.pem`,
-`.claude-config/`, `*.log`.
+Generated/secret files are git-ignored: `.env`, `ca-bundle.pem`, `*.pem`, `*.key`,
+`certs/`, `.claude-config/`, `*.log`.
 
 ---
 
@@ -122,136 +126,95 @@ cd claude-code-split-billing
 cp .env.example .env          # Windows: copy .env.example .env
 ```
 
-Edit `.env` and fill in your gateway:
+Edit `.env`: `GATEWAY_HOST` (required), `GATEWAY_BASE_PATH`, `GATEWAY_HEADERS`
+(**your secret key goes here**), optional `GATEWAY_MODEL_MAP`. Keep `PROXY_PORT=443`.
 
-- `GATEWAY_HOST` — the gateway hostname (required).
-- `GATEWAY_BASE_PATH` — path prefix before `/v1/messages` (empty if served at root).
-- `GATEWAY_HEADERS` — JSON of headers to inject for auth/identity. **Your secret key
-  goes here**, e.g. `{"Authorization":"Bearer <TOKEN>"}` or
-  `{"<AUTH_HEADER>":"<KEY>","<USER_HEADER>":"<USER_ID>"}`.
-- `GATEWAY_MODEL_MAP` — optional; only if your gateway rejects the model ids Claude Code
-  sends. See the [Configuration](#configuration) table.
-
-### 2. (Only if your network intercepts TLS) Trust the corporate root CA
-
-First check whether you even need this:
+### 2. Generate the local CA + leaf certificate
 
 ```bash
-node scripts/test-control-plane.js
+bash scripts/gen-certs.sh          # --force to regenerate
 ```
 
-If all hosts report OK, **skip to step 3**. If you see
-`unable to get local issuer certificate`, export your corporate root CA:
+Writes `certs/{ca,server}.{key,pem}` and copies the CA to `ca-bundle.pem` (what the
+launcher feeds Node via `NODE_EXTRA_CA_CERTS`). All git-ignored.
 
-- **Windows:**
-  ```powershell
-  powershell -ExecutionPolicy Bypass -File scripts\setup-ca.ps1 -Diagnose
-  powershell -ExecutionPolicy Bypass -File scripts\setup-ca.ps1 -RootMatch 'Your Corp Root CA'
-  ```
-- **macOS/Linux:**
-  ```bash
-  scripts/setup-ca.sh --diagnose            # find your root CA's issuer name
-  scripts/setup-ca.sh /path/to/corp-root-ca.pem
-  ```
+### 3. Hijack api.anthropic.com to the local proxy (Administrator)
 
-Both write `ca-bundle.pem` to the repo root and re-run the connectivity test. The
-launcher picks it up automatically if present.
+```powershell
+# Windows, elevated PowerShell:
+powershell -ExecutionPolicy Bypass -File scripts\hosts-hijack.ps1 enable
+powershell -ExecutionPolicy Bypass -File scripts\hosts-hijack.ps1 status
+```
 
-### 3. Choose a config directory + enable Remote Control
+Adds `127.0.0.1  api.anthropic.com  # cc-split-billing` to the hosts file (tagged so it
+can be removed cleanly) and flushes DNS. `disable` reverts it. On macOS/Linux edit
+`/etc/hosts` with the same tagged line.
 
-`setup-config.sh` records which Claude Code config directory `cc` uses (in the git-ignored
-`.cc-config-dir`) and turns on Remote Control. Run it with **no flag** and it **asks you which
-mode to use**; pass a flag to choose non-interactively.
+> If the write fails with *"being used by another process"*, an AV/VPN/DNS tool is holding
+> the hosts file. The script retries with a shared handle; if it still fails, edit the file
+> manually (keep the `# cc-split-billing` tag) and run `ipconfig /flushdns`.
+
+### 4. Choose a config directory + enable Remote Control
+
+`setup-config` records which Claude Code config dir `cc` uses (`.cc-config-dir`) and turns
+on Remote Control. Run with no flag to be asked; or pass `--inherit` (share your real
+`~/.claude`) / `--isolated` (separate login).
 
 - **Windows:** `powershell -ExecutionPolicy Bypass -File scripts\setup-config.ps1`
 - **macOS/Linux:** `scripts/setup-config.sh`
 
-```
-Enable inherit (shared) mode? [y/N]
-```
+### 5. Put the launcher on your PATH, then log in
 
-Answer **N** (or pass `--isolated` / `-Isolated`) for **isolated** mode, or **y** (or pass
-`--inherit` / `-Inherit`) for **shared** mode. In a non-interactive shell it defaults to isolated.
-
-**Isolated (default)** — a separate config/credentials directory at `.claude-config/`, fully
-independent of your normal `~/.claude`. You log in separately under `cc`; plugins, skills and
-sessions are **not** shared.
-
-**Shared (inherit)** — reuse your real `~/.claude` so `cc` and `claude` share **everything
-live**: login, plugins, skills, sessions, MCP servers and settings. Only inference billing
-differs (`cc` → gateway, `claude` → subscription). If `~/.claude` is already OAuth-logged-in,
-`cc` needs no separate `/login`. This writes one key (`enableRemoteControlByDefault`) into
-`~/.claude/settings.json`; all other keys are preserved. To skip the prompt:
-
-```bash
-scripts/setup-config.sh --inherit            # share ~/.claude
-scripts/setup-config.sh --inherit /path/dir  # or share a specific config dir
-scripts/setup-config.sh --isolated           # force isolated, no prompt
-```
-
-> Trade-off: in `--inherit` mode `cc` does read/write your real `~/.claude`. That's the point —
-> shared state — but it's no longer isolated. Use the default mode if you want them separate.
-
-### 4. Put the launcher on your PATH
-
-Use `cc` exactly like `claude`. Add the `bin/` directory to your `PATH`, or symlink the
-launcher somewhere already on it.
-
-- **Windows:** add the repo's `bin\` to your `PATH` (e.g. via *Edit environment
-  variables*), or copy `bin\cc.cmd` into a directory already on `PATH`.
-- **macOS/Linux:**
-  ```bash
-  chmod +x bin/cc
-  ln -s "$(pwd)/bin/cc" ~/.local/bin/cc   # ensure ~/.local/bin is on your PATH
-  ```
-
-### 5. First login
+Add `bin/` to `PATH` (or symlink `bin/cc` / copy `bin\cc.cmd` onto it), then:
 
 ```bash
 cc
 ```
 
-Run `/login` → choose the **subscription (claude.ai)** option → complete OAuth in the
-browser. The login is stored in the isolated config dir; you won't need to repeat it.
+Run `/login` → **subscription (claude.ai)** → complete OAuth. (In `--inherit` mode, if
+`~/.claude` is already logged in, you can skip this.)
 
 ### 6. Verify
 
 - Ask anything (e.g. `hi`).
-- Check `proxy.log`: you should see
-  `REQ POST /v1/messages -> <GATEWAY_HOST>.../v1/messages` followed by `RES 200`
-  → inference really went to your gateway.
-- Startup should **not** show "Couldn't verify Remote Control eligibility".
-- Open `claude.ai/code` (or the mobile app's Code tab, same account) and confirm the
-  session shows up and is controllable.
+- `proxy.log` should show **both**:
+  `REQ POST /v1/messages* -> <GATEWAY_HOST>...` → `RES 200` (inference billed to gateway),
+  **and** `REQ ... -> api.anthropic.com (<real-ip>)` for RC (`sessions`, `presence`,
+  `heartbeat`, `worker/events`).
+- Startup does **not** show "only available when using Claude via api.anthropic.com" or
+  "Couldn't verify Remote Control eligibility".
+- Open `claude.ai/code` (or the mobile app) on the same account and confirm the session
+  appears and is controllable.
 
 ---
 
 ## Daily usage
 
-Open a terminal and use `cc` as a drop-in for `claude` — all arguments pass through:
+Use `cc` as a drop-in for `claude` — all arguments pass through:
 
 ```bash
 cc                                   # normal interactive session
-cc --resume                          # resume picker
-cc -c "fix the build"                # continue last session with a prompt
-cc --dangerously-skip-permissions    # any launch flag works
+cc --resume
+cc --dangerously-skip-permissions
 ```
 
-On each launch, `cc` automatically: isolates the config dir → forces OAuth (clears
-`ANTHROPIC_API_KEY`-type vars) → points inference at the local proxy → feeds Node the CA
-bundle if present → ensures the proxy is running (`ensure-proxy.js`, idempotent) →
-launches `claude`. Remote Control is on by default via `settings.json`.
+On each launch `cc`: sets `ANTHROPIC_BASE_URL=https://api.anthropic.com` → clears
+`ANTHROPIC_API_KEY`-type vars (forces OAuth) → feeds Node the CA bundle → checks the hosts
+hijack is active (errors out with instructions if not) → ensures the proxy is running
+(`ensure-proxy.js`) → launches `claude`. Remote Control is on by default via `settings.json`.
+
+**To temporarily go back to plain, un-intercepted Claude Code** (subscription inference,
+normal `api.anthropic.com`): `hosts-hijack.ps1 disable`. Re-`enable` to resume split billing.
 
 ---
 
 ## Configuration
 
-All settings live in `.env` (loaded by `src/proxy.js`). See `.env.example` for the
-annotated template.
+All settings live in `.env` (loaded by `src/proxy.js`). See `.env.example`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PROXY_PORT` | `8787` | Port the local proxy listens on. |
+| `PROXY_PORT` | `443` | **Must be 443** in MITM mode (host has no port → always 443). |
 | `PROXY_HOST` | `127.0.0.1` | Interface the proxy binds (keep loopback). |
 | `GATEWAY_HOST` | — (**required**) | Gateway hostname inference is billed to. |
 | `GATEWAY_PORT` | `443` | Gateway TLS port. |
@@ -260,7 +223,8 @@ annotated template.
 | `GATEWAY_STRIP_HEADERS` | `authorization,x-api-key` | Client headers removed before forwarding upstream. |
 | `GATEWAY_MODEL_MAP` | empty | JSON `{substring: replacement}`; remaps model ids. Empty = pass through. |
 | `GATEWAY_DEFAULT_MODEL` | empty | Model id used only when a request has no/invalid model. |
-| `CONTROL_HOST` | `api.anthropic.com` | Control-plane host for non-inference traffic. |
+| `CONTROL_HOST` | `api.anthropic.com` | Real control-plane host (reached via resolved IP). |
+| `PROXY_CERT_DIR` / `PROXY_TLS_KEY` / `PROXY_TLS_CERT` | `certs/…` | Override cert/key locations. |
 
 ---
 
@@ -268,24 +232,26 @@ annotated template.
 
 | Symptom | Cause / fix |
 |---|---|
-| `Couldn't verify Remote Control eligibility … flag ignored` | Node doesn't trust the control-plane TLS. Re-run `setup-ca.*` and confirm `NODE_EXTRA_CA_CERTS` points at a valid bundle. |
-| `unable to get local issuer certificate` | Same as above — the root CA isn't trusted by Node. |
-| Inference not hitting the gateway (subscription quota dropping) | Check `proxy.log` for `/v1/messages` hits; confirm `ANTHROPIC_BASE_URL` points at the proxy, the proxy is running, and `cc` cleared `ANTHROPIC_API_KEY`. |
-| Gateway returns the wrong model / a fallback | The model id wasn't accepted. Set `GATEWAY_MODEL_MAP` to remap to ids your gateway knows. |
-| Remote Control still doesn't appear | Confirm the isolated `settings.json` has `enableRemoteControlByDefault: true` and you logged in with OAuth (not an API key). |
-| `HTTP 400` missing a required header | Your gateway needs a header you didn't inject. Add it to `GATEWAY_HEADERS`. |
-| `FATAL: GATEWAY_HOST is not set` | Copy `.env.example` to `.env` and fill in `GATEWAY_HOST`. |
-| `cc: need Node.js >= 18 …` | The `node` on your `PATH` is too old. Install Node ≥ 18, or `export NODE_BIN=/path/to/a/newer/node`. |
+| `Remote Control is only available when using Claude via api.anthropic.com` | `ANTHROPIC_BASE_URL` host isn't `api.anthropic.com`. In MITM mode it must be `https://api.anthropic.com` (set by `cc`) with the hosts hijack active. |
+| RC works but inference still hits your subscription | `proxy.log` has no `/v1/messages -> <gateway>`. Confirm the hosts hijack is enabled and the proxy is listening on 443. |
+| `EADDRINUSE :443` | Something else owns 443 (old proxy, IIS, Skype). Stop it, or change `PROXY_PORT` (but then the RC check breaks — 443 is required). |
+| TLS errors / `unable to verify` in Claude | `NODE_EXTRA_CA_CERTS` isn't pointing at `ca-bundle.pem`, or certs weren't generated. Re-run `gen-certs.sh`; `cc` sets the var automatically. |
+| hosts write fails "being used by another process" | AV/VPN/DNS tool locking the file. Script retries; else edit manually + `ipconfig /flushdns`. |
+| Gateway returns the wrong model / a fallback | Set `GATEWAY_MODEL_MAP` to ids your gateway knows. |
+| `FATAL: GATEWAY_HOST is not set` / `cannot read TLS cert/key` | Fill `.env` / run `gen-certs.sh`. |
+| Browser can't reach claude.ai/anthropic while enabled | Expected: the hosts hijack is global. `hosts-hijack.ps1 disable` to restore. |
 
 ---
 
 ## Security notes
 
-- Your gateway secret lives in `.env` (git-ignored). **Never commit it** or place it on a
-  shared drive. Rotate it if it leaks.
-- The isolated config dir `.claude-config/` holds **OAuth credentials** — equivalent to a
-  logged-in session. Protect it accordingly (also git-ignored).
-- The proxy binds `127.0.0.1` only and is not exposed to the network.
+- The generated CA private key (`certs/ca.key`) can mint trusted-by-your-Node certs for
+  `api.anthropic.com`. It stays local and git-ignored; **never share it**. The CA is only
+  trusted by processes you point at it via `NODE_EXTRA_CA_CERTS` (not the system store).
+- Your gateway secret lives in `.env` (git-ignored). Never commit it; rotate if it leaks.
+- The isolated config dir `.claude-config/` holds **OAuth credentials**. Protect it.
+- The proxy binds `127.0.0.1` only.
+- The hosts hijack is **global and persistent** until you `disable` it.
 
 ---
 
