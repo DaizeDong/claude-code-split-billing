@@ -1,4 +1,4 @@
-// Per-request decision flow for the local proxy.
+// Per-request decision flow for the local proxy (MITM mode).
 // Render:  dot -Tsvg docs/request-flow.dot -o docs/request-flow.svg
 digraph request_flow {
   rankdir=TB;
@@ -6,12 +6,12 @@ digraph request_flow {
   fontname="Helvetica";
   labelloc="t";
   fontsize=18;
-  label=<<b>Request rewrite flow</b><br/><font point-size="10">how the local proxy decides what to do with each request</font><br/> >;
+  label=<<b>Request rewrite flow</b><br/><font point-size="10">how the local HTTPS proxy decides what to do with each request</font><br/> >;
 
   node [fontname="Helvetica", fontsize=11];
   edge [fontname="Helvetica", fontsize=10, penwidth=1.4];
 
-  start [label=<<b>Incoming request</b><br/><font point-size="9">from Claude Code via ANTHROPIC_BASE_URL</font>>,
+  start [label=<<b>Incoming request</b><br/><font point-size="9">Claude Code &rarr; https://api.anthropic.com &rarr; (hosts) &rarr; 127.0.0.1:443</font>>,
          shape=box, style="rounded,filled", fillcolor="#eef2ff", color="#6366f1", penwidth=1.6];
 
   d1 [label=<HEAD/GET on &quot;/&quot; ?<br/><font point-size="9">base-URL reachability probe</font>>,
@@ -24,10 +24,10 @@ digraph request_flow {
 
   inf [label=<<b>Inference rewrite</b><br align="left"/><font point-size="9">- strip Authorization / x-api-key<br align="left"/>- inject GATEWAY_HEADERS<br align="left"/>- optional model remap (GATEWAY_MODEL_MAP)<br align="left"/>- prepend GATEWAY_BASE_PATH<br align="left"/></font>>,
        shape=box, style="rounded,filled", fillcolor="#fef9c3", color="#ca8a04", penwidth=1.6];
-  gw [label=<<b>Forward to your gateway</b><br/><font point-size="9">tokens billed here</font>>,
+  gw [label=<<b>Forward to your API provider</b><br/><font point-size="9">any Anthropic-compatible endpoint · tokens billed here</font>>,
       shape=cylinder, style="filled", fillcolor="#fef9c3", color="#ca8a04", penwidth=1.6];
 
-  pass [label=<<b>Pass through unchanged</b><br/><font point-size="9">api.anthropic.com</font><br/><font point-size="9">OAuth · Remote Control · feature flags</font>>,
+  pass [label=<<b>Forward to real Anthropic</b><br/><font point-size="9">api.anthropic.com via dns.resolve4 + SNI</font><br/><font point-size="9">OAuth · Remote Control · feature flags</font>>,
         shape=box, style="rounded,filled", fillcolor="#dcfce7", color="#16a34a", penwidth=1.6];
 
   start -> d1;

@@ -1,4 +1,4 @@
-// Architecture diagram for claude-code-split-billing.
+// Architecture diagram for claude-code-split-billing (MITM mode).
 // Render:  dot -Tsvg docs/architecture.dot -o docs/architecture.svg
 digraph architecture {
   rankdir=LR;
@@ -7,33 +7,37 @@ digraph architecture {
   fontname="Helvetica";
   labelloc="t";
   fontsize=20;
-  label=<<b>claude-code-split-billing — architecture</b><br/><font point-size="11">Subscription Remote Control stays on; inference is billed to a custom gateway</font><br/> >;
+  label=<<b>claude-code-split-billing — architecture</b><br/><font point-size="11">Subscription Remote Control stays on; inference is billed to any Anthropic-compatible API provider</font><br/> >;
 
   node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled", penwidth=1.6, margin="0.20,0.13"];
   edge [fontname="Helvetica", fontsize=10, penwidth=1.4];
 
-  cc [label=<<b>Claude Code</b><br/><font point-size="10">OAuth login · no ANTHROPIC_API_KEY</font>>,
+  cc [label=<<b>Claude Code</b><br/><font point-size="10">OAuth login · no ANTHROPIC_API_KEY</font><br/><font point-size="9">ANTHROPIC_BASE_URL = https://api.anthropic.com</font>>,
       fillcolor="#eef2ff", color="#6366f1"];
 
-  proxy [label=<<b>Local rerouting proxy</b><br/><font point-size="10">127.0.0.1:8787</font><br/><font point-size="9">routes by path · rewrites inference</font>>,
+  hosts [label=<<b>hosts hijack</b><br/><font point-size="9">api.anthropic.com &rarr; 127.0.0.1</font>>,
+         shape=note, fillcolor="#fdf2f8", color="#db2777"];
+
+  proxy [label=<<b>Local HTTPS proxy</b><br/><font point-size="10">127.0.0.1:443</font><br/><font point-size="9">TLS-terminates api.anthropic.com (self-signed leaf)</font><br/><font point-size="9">routes by path</font>>,
          fillcolor="#f1f5f9", color="#0f172a"];
 
   gateway [shape=cylinder,
-           label=<<b>Your gateway</b><br/><font point-size="10">Anthropic-compatible</font><br/><b><font point-size="10">tokens billed here</font></b>>,
+           label=<<b>Your API provider</b><br/><font point-size="10">any Anthropic-compatible endpoint</font><br/><b><font point-size="10">tokens billed here</font></b>>,
            fillcolor="#fef9c3", color="#ca8a04"];
 
-  control [label=<<b>Anthropic control plane</b><br/><font point-size="10">api.anthropic.com</font><br/><font point-size="9">OAuth · Remote Control · feature flags</font>>,
+  control [label=<<b>Real Anthropic control plane</b><br/><font point-size="10">api.anthropic.com (resolved IP + SNI)</font><br/><font point-size="9">OAuth · Remote Control · feature flags</font>>,
            fillcolor="#dcfce7", color="#16a34a"];
 
   rc [label=<<b>Remote Control surface</b><br/><font point-size="10">claude.ai/code · mobile app</font>>,
       fillcolor="#e0f2fe", color="#0284c7"];
 
-  cc -> proxy [label="ANTHROPIC_BASE_URL", color="#6366f1"];
-  proxy -> gateway [label=<<b>POST /v1/messages*</b><br/>strip client auth · inject gateway headers<br/>optional model remap>,
+  cc -> proxy [label=<https://api.anthropic.com<br/><font point-size="9">via hosts hijack</font>>, color="#6366f1"];
+  hosts -> proxy [style=dotted, color="#db2777", constraint=false];
+  proxy -> gateway [label=<<b>POST /v1/messages*</b><br/>strip client auth · inject provider headers<br/>optional model remap>,
                     color="#ca8a04", fontcolor="#a16207", penwidth=2.2];
-  proxy -> control [label=<everything else<br/>+ HEAD/GET probes answered locally>,
+  proxy -> control [label=<everything else<br/>resolved via dns.resolve4 (bypasses hosts)<br/>+ HEAD/GET probes answered locally>,
                     color="#16a34a", fontcolor="#15803d"];
-  control -> rc [dir=both, label="register / poll", color="#0284c7"];
+  control -> rc [dir=both, label="sessions / heartbeat", color="#0284c7"];
   rc -> cc [style=dashed, label="view &amp; drive sessions", color="#0284c7", constraint=false];
 
   { rank=same; gateway; control; }

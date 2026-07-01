@@ -48,11 +48,11 @@
     <h1>claude-code-<span class="accent">split-billing</span></h1>
     <div class="tagline">
       Keep Claude Code's <b>Remote Control</b> (subscription / OAuth) while routing
-      <b>inference</b> to a custom gateway &mdash; so token usage is billed separately
-      from your subscription quota.
+      <b>inference</b> to any Anthropic-compatible API provider &mdash; so token usage is
+      billed separately from your subscription quota.
     </div>
     <div class="chips">
-      <span class="chip amber">inference &rarr; your gateway</span>
+      <span class="chip amber">inference &rarr; your API provider</span>
       <span class="chip green">control plane &rarr; Anthropic</span>
       <span class="chip blue">Remote Control stays on</span>
     </div>
@@ -61,10 +61,10 @@
   <div class="flow">
     <div class="node">Claude Code<small>OAuth · no API key</small></div>
     <span class="arrow">&rarr;</span>
-    <div class="node">Local proxy<small>127.0.0.1:8787</small></div>
+    <div class="node">Local HTTPS proxy<small>intercepts api.anthropic.com</small></div>
     <span class="arrow">&rarr;</span>
     <div class="branch">
-      <div class="node gw">Your gateway<small>tokens billed here</small></div>
+      <div class="node gw">Your API provider<small>tokens billed here</small></div>
       <div class="node ctl">Anthropic control plane<small>OAuth · Remote Control</small></div>
     </div>
   </div>
