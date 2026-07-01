@@ -1,6 +1,6 @@
 {
   "name": "claude-code-split-billing",
-  "version": "1.0.0",
+  "version": "2.1.197",
   "description": "Keep Claude Code's Remote Control (subscription/OAuth) while routing inference to a custom Anthropic-compatible gateway, so token usage is billed separately from your subscription quota.",
   "license": "MIT",
   "type": "commonjs",
