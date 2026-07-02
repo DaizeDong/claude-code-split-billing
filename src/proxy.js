@@ -1,26 +1,28 @@
 'use strict';
-// Local HTTPS rerouting proxy for Claude Code (MITM-of-api.anthropic.com mode).
+// Local rerouting proxy for Claude Code — AF_UNIX socket mode (Bun).
 //
-// Why MITM: current Claude Code gates Remote Control on
-//   new URL(process.env.ANTHROPIC_BASE_URL).host === "api.anthropic.com"
-// (a pure string check). So to keep RC working AND bill inference to a custom
-// gateway, we point the client at https://api.anthropic.com, hijack that host to
-// 127.0.0.1 via the system hosts file, and terminate TLS here with a self-signed
-// leaf for api.anthropic.com (trusted by Node via NODE_EXTRA_CA_CERTS).
+// Why a unix socket (and why Bun): current Claude Code enables Remote Control when
+//   isFirstParty && (process.env.ANTHROPIC_UNIX_SOCKET is set || baseURL host === "api.anthropic.com")
+// and, when ANTHROPIC_UNIX_SOCKET is set, sends ALL API traffic over that socket via
+// Bun's `fetch(url, { unix })`. On Windows that unix option is an AF_UNIX filesystem
+// socket, which Node cannot serve — so this proxy runs under Bun (`Bun.serve({ unix })`).
 //
-//   POST /v1/messages*   -> your inference gateway  (billed there)
-//   everything else      -> the REAL api.anthropic.com  (OAuth / Remote Control)
+// Pointing cc at a socket means NO system hosts hijack, NO privileged port 443, and NO
+// self-signed CA: plain `claude` (which never sets ANTHROPIC_UNIX_SOCKET) is completely
+// unaffected. That is the isolation cc gives you.
 //
-// The real upstream is reached by resolving api.anthropic.com via dns.resolve4()
-// (which queries real DNS servers and ignores the hosts file), then connecting to
-// that IP with SNI/Host = api.anthropic.com — avoiding the self-hijack loop.
+//   POST /v1/messages*  -> your inference gateway         (billed there)
+//   everything else     -> the real https://api.anthropic.com  (OAuth / Remote Control)
+//
+// In socket mode Claude Code does not attach its own auth ("the local proxy is
+// API-key-authed"): this proxy injects gateway credentials for inference and the
+// user's OAuth bearer for the control plane. The bearer is read fresh from the config
+// dir's .credentials.json (so token refreshes done by Claude are picked up).
 //
 // All gateway-specific values come from the environment (see .env.example).
 
-const https = require('node:https');
-const tls = require('node:tls');
-const dns = require('node:dns');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const REPO_ROOT = path.join(__dirname, '..');
@@ -44,14 +46,20 @@ const REPO_ROOT = path.join(__dirname, '..');
   }
 })();
 
-const PORT = Number(process.env.PROXY_PORT || 443);
-const HOST = process.env.PROXY_HOST || '127.0.0.1';
+if (typeof Bun === 'undefined') {
+  console.error('FATAL: proxy.js must be run with Bun (Node cannot serve an AF_UNIX socket on Windows).');
+  console.error('Install Bun:  npm i -g bun    (or see https://bun.sh)  then relaunch cc.');
+  process.exit(1);
+}
+
+// --- socket the proxy listens on (must match what cc exports as ANTHROPIC_UNIX_SOCKET) ---
+const SOCK = process.env.CC_SOCK || process.env.ANTHROPIC_UNIX_SOCKET;
+if (!SOCK) { console.error('FATAL: CC_SOCK / ANTHROPIC_UNIX_SOCKET not set.'); process.exit(1); }
 
 // --- Gateway (Anthropic-compatible inference endpoint) ---
-const GATEWAY_HOST = process.env.GATEWAY_HOST || '';           // REQUIRED, e.g. gateway.example.com
-const GATEWAY_PORT = Number(process.env.GATEWAY_PORT || 443);
-const GATEWAY_BASE_PATH = process.env.GATEWAY_BASE_PATH || ''; // prefix before /v1/messages
-
+const GATEWAY_HOST = process.env.GATEWAY_HOST || '';
+const GATEWAY_PORT = process.env.GATEWAY_PORT || '';
+const GATEWAY_BASE_PATH = process.env.GATEWAY_BASE_PATH || '';
 function parseJsonEnv(name, fallback) {
   const v = process.env[name];
   if (!v) return fallback;
@@ -63,33 +71,35 @@ const GATEWAY_STRIP_HEADERS = (process.env.GATEWAY_STRIP_HEADERS || 'authorizati
 const GATEWAY_MODEL_MAP = parseJsonEnv('GATEWAY_MODEL_MAP', {});
 const GATEWAY_DEFAULT_MODEL = process.env.GATEWAY_DEFAULT_MODEL || '';
 
-// --- Control plane (OAuth refresh, Remote Control register/poll, feature flags) ---
+// --- Control plane (real Anthropic; OAuth refresh, Remote Control register/poll) ---
 const CONTROL_HOST = process.env.CONTROL_HOST || 'api.anthropic.com';
-
-// --- TLS material for terminating https://api.anthropic.com locally ---
-const CERT_DIR = process.env.PROXY_CERT_DIR || path.join(REPO_ROOT, 'certs');
-const KEY_PATH = process.env.PROXY_TLS_KEY || path.join(CERT_DIR, 'server.key');
-const CRT_PATH = process.env.PROXY_TLS_CERT || path.join(CERT_DIR, 'server.pem');
+const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 
 if (!GATEWAY_HOST) {
   console.error('FATAL: GATEWAY_HOST is not set. Copy .env.example to .env and fill it in.');
-  process.exit(1);
-}
-let TLS_KEY, TLS_CERT;
-try {
-  TLS_KEY = fs.readFileSync(KEY_PATH);
-  TLS_CERT = fs.readFileSync(CRT_PATH);
-} catch (e) {
-  console.error(`FATAL: cannot read TLS cert/key (${KEY_PATH}, ${CRT_PATH}).`);
-  console.error('Run scripts/gen-certs.sh first.');
   process.exit(1);
 }
 
 const LOG_FILE = process.env.PROXY_LOG || path.join(REPO_ROOT, 'proxy.log');
 function log(...args) {
   const line = `[${new Date().toISOString()}] ` + args.join(' ');
-  console.log(line);
   try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch { /* ignore */ }
+}
+
+// --- OAuth bearer for the control plane, read fresh (5s cache) from .credentials.json ---
+// Claude Code refreshes this file itself; re-reading keeps us on the current access token.
+let bearerCache = { token: null, at: 0 };
+function getOAuthBearer() {
+  const now = Date.now();
+  if (bearerCache.token && now - bearerCache.at < 5000) return bearerCache.token;
+  let token = null;
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(CONFIG_DIR, '.credentials.json'), 'utf8'));
+    token = j?.claudeAiOauth?.accessToken || null;
+  } catch { /* file-based creds absent (e.g. macOS keychain); rely on env fallback */ }
+  if (!token) token = process.env.PROXY_OAUTH_BEARER || null;
+  bearerCache = { token, at: now };
+  return token;
 }
 
 function mapModel(model) {
@@ -101,149 +111,73 @@ function mapModel(model) {
   return model;
 }
 
-function isInferencePath(p) {
-  return p === '/v1/messages' || p.startsWith('/v1/messages');
+function isInferencePath(p) { return p === '/v1/messages' || p.startsWith('/v1/messages'); }
+
+function scrubHeaders(h) {
+  const out = {};
+  for (const [k, v] of h) out[k] = v;
+  delete out['host']; delete out['content-length']; delete out['accept-encoding']; delete out['connection'];
+  return out;
 }
 
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on('data', (c) => chunks.push(c));
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
-  });
-}
+Bun.serve({
+  unix: SOCK,
+  idleTimeout: 0,
+  async fetch(req) {
+    const url = new URL(req.url);
+    const pathq = url.pathname + url.search;
 
-// --- Resolve the REAL api.anthropic.com IP, bypassing the hosts hijack. ---
-// dns.resolve4 queries configured DNS servers directly and ignores the hosts file
-// (unlike dns.lookup). Cached with a short TTL; falls back to the last good IP.
-let ipCache = { ip: null, at: 0 };
-const IP_TTL_MS = 60_000;
-function resolveControlIp() {
-  return new Promise((resolve, reject) => {
-    const now = Date.now();
-    if (ipCache.ip && now - ipCache.at < IP_TTL_MS) return resolve(ipCache.ip);
-    dns.resolve4(CONTROL_HOST, (e, addrs) => {
-      if (!e && addrs && addrs.length) {
-        ipCache = { ip: addrs[0], at: now };
-        return resolve(addrs[0]);
+    // liveness probe used by ensure-proxy.js
+    if (url.pathname === '/__cc_ping') return new Response('cc-proxy', { status: 200 });
+
+    const toGateway = req.method === 'POST' && isInferencePath(url.pathname);
+    let bodyBuf;
+    if (req.body) { try { bodyBuf = Buffer.from(await req.arrayBuffer()); } catch { bodyBuf = undefined; } }
+
+    const headers = scrubHeaders(req.headers);
+    let target, label, note = '';
+
+    if (toGateway) {
+      for (const h of GATEWAY_STRIP_HEADERS) delete headers[h];
+      for (const [k, v] of Object.entries(GATEWAY_HEADERS)) headers[k.toLowerCase()] = v;
+      if (bodyBuf) {
+        try {
+          const j = JSON.parse(bodyBuf.toString('utf8'));
+          if (j && typeof j === 'object' && 'model' in j) {
+            const mapped = mapModel(j.model);
+            if (mapped !== j.model) { note = `model ${j.model} -> ${mapped}`; j.model = mapped; bodyBuf = Buffer.from(JSON.stringify(j), 'utf8'); }
+          }
+        } catch { /* not JSON */ }
       }
-      if (ipCache.ip) return resolve(ipCache.ip); // stale but usable
-      reject(e || new Error('no A record for ' + CONTROL_HOST));
-    });
-  });
-}
-
-const server = https.createServer({ key: TLS_KEY, cert: TLS_CERT }, async (req, res) => {
-  // Local reachability probe (HEAD/GET /). Answer locally.
-  if ((req.method === 'HEAD' || req.method === 'GET') && (req.url === '/' || req.url === '')) {
-    log('PROBE', req.method, req.url, '-> 200 (local)');
-    res.writeHead(200); res.end(); return;
-  }
-
-  let bodyBuf;
-  try { bodyBuf = await readBody(req); }
-  catch (e) { log('ERR reading body', req.method, req.url, String(e)); res.writeHead(400); res.end('bad request body'); return; }
-
-  const toGateway = req.method === 'POST' && isInferencePath(req.url);
-
-  const headers = { ...req.headers };
-  delete headers['host'];
-  delete headers['content-length'];
-  delete headers['accept-encoding'];
-
-  let opts, upstreamLabel, modelNote = '';
-
-  if (toGateway) {
-    for (const h of GATEWAY_STRIP_HEADERS) delete headers[h];
-    for (const [k, v] of Object.entries(GATEWAY_HEADERS)) headers[k.toLowerCase()] = v;
-    headers['host'] = GATEWAY_HOST;
-
-    try {
-      const json = JSON.parse(bodyBuf.toString('utf8'));
-      if (json && typeof json === 'object' && 'model' in json) {
-        const orig = json.model, mapped = mapModel(orig);
-        if (mapped !== orig) { json.model = mapped; modelNote = `model ${orig} -> ${mapped}`; bodyBuf = Buffer.from(JSON.stringify(json), 'utf8'); }
+      const portSeg = GATEWAY_PORT && GATEWAY_PORT !== '443' ? `:${GATEWAY_PORT}` : '';
+      target = `https://${GATEWAY_HOST}${portSeg}${GATEWAY_BASE_PATH}${pathq}`;
+      label = 'INFER';
+    } else {
+      // control plane -> real Anthropic; inject OAuth bearer if the client sent none
+      if (!headers['authorization']) {
+        const bearer = getOAuthBearer();
+        if (bearer) headers['authorization'] = 'Bearer ' + bearer;
       }
-    } catch { /* not JSON */ }
-
-    if (bodyBuf && bodyBuf.length) headers['content-length'] = String(bodyBuf.length);
-    opts = { host: GATEWAY_HOST, port: GATEWAY_PORT, method: req.method, path: GATEWAY_BASE_PATH + req.url, headers };
-    upstreamLabel = GATEWAY_HOST + GATEWAY_BASE_PATH + req.url;
-    forward(opts, bodyBuf, req, res, upstreamLabel, modelNote);
-  } else {
-    // Control plane -> REAL api.anthropic.com (via resolved IP + SNI).
-    headers['host'] = CONTROL_HOST;
-    if (bodyBuf && bodyBuf.length) headers['content-length'] = String(bodyBuf.length);
-    let ip;
-    try { ip = await resolveControlIp(); }
-    catch (e) { log('ERR resolve', CONTROL_HOST, String(e)); res.writeHead(502); res.end('dns error'); return; }
-    opts = { host: ip, port: 443, servername: CONTROL_HOST, method: req.method, path: req.url, headers };
-    upstreamLabel = CONTROL_HOST + req.url + ` (${ip})`;
-    forward(opts, bodyBuf, req, res, upstreamLabel, '');
-  }
-});
-
-function forward(opts, bodyBuf, req, res, label, modelNote) {
-  log('REQ', req.method, req.url, '->', label, modelNote);
-  const upstream = https.request(opts, (ur) => {
-    const outHeaders = { ...ur.headers };
-    delete outHeaders['transfer-encoding'];
-    delete outHeaders['connection'];
-    res.writeHead(ur.statusCode || 502, outHeaders);
-    ur.pipe(res);
-    log('RES', ur.statusCode, 'from', label);
-  });
-  upstream.on('error', (e) => {
-    log('ERR upstream', label, String(e));
-    if (!res.headersSent) res.writeHead(502);
-    res.end('upstream error: ' + String(e));
-  });
-  if (bodyBuf && bodyBuf.length) upstream.write(bodyBuf);
-  upstream.end();
-}
-
-// --- WebSocket / Upgrade tunneling for the control plane (RC bridge, etc.). ---
-// Inference never upgrades, so all upgrades go to the real control host.
-server.on('upgrade', async (req, socket, head) => {
-  let ip;
-  try { ip = await resolveControlIp(); }
-  catch (e) { log('ERR upgrade resolve', String(e)); socket.destroy(); return; }
-  log('UPGRADE', req.url, '->', CONTROL_HOST, `(${ip})`);
-  const up = tls.connect({ host: ip, port: 443, servername: CONTROL_HOST }, () => {
-    let reqLine = `${req.method} ${req.url} HTTP/1.1\r\n`;
-    const h = { ...req.headers, host: CONTROL_HOST };
-    for (const [k, v] of Object.entries(h)) {
-      if (Array.isArray(v)) { for (const vv of v) reqLine += `${k}: ${vv}\r\n`; }
-      else reqLine += `${k}: ${v}\r\n`;
+      target = `https://${CONTROL_HOST}${pathq}`;
+      label = 'CTRL';
     }
-    reqLine += '\r\n';
-    up.write(reqLine);
-    if (head && head.length) up.write(head);
-    socket.pipe(up);
-    up.pipe(socket);
-  });
-  up.on('error', (e) => { log('ERR upgrade upstream', String(e)); socket.destroy(); });
-  socket.on('error', () => up.destroy());
+
+    log('REQ', req.method, url.pathname, '->', label, note);
+    try {
+      const r = await fetch(target, { method: req.method, headers, body: bodyBuf });
+      log('RES', r.status, label, url.pathname);
+      const outH = new Headers(r.headers);
+      outH.delete('content-encoding'); outH.delete('content-length'); outH.delete('transfer-encoding');
+      return new Response(r.body, { status: r.status, headers: outH });
+    } catch (e) {
+      log('ERR', label, url.pathname, String(e));
+      return new Response('proxy upstream error: ' + String(e), { status: 502 });
+    }
+  },
+  error(e) { log('SERVER ERROR', String(e)); return new Response('proxy error', { status: 500 }); },
 });
 
-server.on('error', (e) => {
-  if (e.code === 'EACCES') {
-    console.error(`FATAL: cannot bind ${HOST}:${PORT} (permission denied).`);
-    console.error('Port 443 is privileged on macOS/Linux. Options:');
-    console.error('  Linux:  sudo setcap "cap_net_bind_service=+ep" "$(command -v node)"   then relaunch cc');
-    console.error('  any:    run the proxy as root once:  sudo -E node src/proxy.js');
-    console.error('  or redirect 443 -> a high port (see README "Port 443 on macOS/Linux").');
-  } else if (e.code === 'EADDRINUSE') {
-    console.error(`FATAL: ${HOST}:${PORT} already in use (another proxy? IIS? Skype? a stale node?).`);
-  } else {
-    console.error('FATAL: proxy server error:', String(e));
-  }
-  process.exit(1);
-});
-
-server.listen(PORT, HOST, () => {
-  log(`HTTPS proxy listening on https://${HOST}:${PORT}  (terminating ${CONTROL_HOST})`);
-  log(`inference -> https://${GATEWAY_HOST}${GATEWAY_BASE_PATH}/v1/messages  (billed to your gateway)`);
-  log(`control   -> https://${CONTROL_HOST}  (real, via resolved IP; OAuth / Remote Control)`);
-});
+log(`unix proxy listening on ${SOCK}`);
+log(`inference -> https://${GATEWAY_HOST}${GATEWAY_BASE_PATH}/v1/messages  (billed to your gateway)`);
+log(`control   -> https://${CONTROL_HOST}  (real; OAuth / Remote Control)`);
+console.log(`cc proxy listening on ${SOCK}`);

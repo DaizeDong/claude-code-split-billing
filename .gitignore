@@ -13,6 +13,9 @@ certs/
 # Records which config dir cc uses (may be a personal absolute path)
 .cc-config-dir
 
+# Unix domain sockets (cc's proxy socket lives under ~/.cc, but never commit one)
+*.sock
+
 # Logs
 *.log
 proxy.log

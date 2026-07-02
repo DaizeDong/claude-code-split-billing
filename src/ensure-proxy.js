@@ -1,48 +1,47 @@
 'use strict';
-// Start the rerouting proxy if it isn't already listening.
-// Exits quickly either way so the wrapper can proceed to launch claude. Idempotent.
+// Ensure the cc rerouting proxy is up on the AF_UNIX socket. Idempotent; runs under Bun.
+// Pings the socket; if nothing answers, clears a stale socket file, spawns proxy.js
+// detached, and polls until it responds (or fails fast). cc runs this before launching claude.
 
-const net = require('node:net');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
 const fs = require('node:fs');
+const path = require('node:path');
 
-const PORT = Number(process.env.PROXY_PORT || 443);
-const HOST = process.env.PROXY_HOST || '127.0.0.1';
-const REPO_ROOT = path.join(__dirname, '..');
+if (typeof Bun === 'undefined') {
+  console.error('ensure-proxy: must run under Bun (npm i -g bun).');
+  process.exit(1);
+}
 
-const sock = net.connect({ host: HOST, port: PORT });
-sock.setTimeout(800);
-sock.on('connect', () => { sock.destroy(); process.exit(0); }); // already running
+const SOCK = process.env.CC_SOCK || process.env.ANTHROPIC_UNIX_SOCKET;
+if (!SOCK) { console.error('ensure-proxy: CC_SOCK / ANTHROPIC_UNIX_SOCKET not set.'); process.exit(1); }
 
-const startProxy = () => {
-  const logfd = fs.openSync(path.join(REPO_ROOT, 'proxy-stdout.log'), 'a');
-  const child = spawn(process.execPath, [path.join(__dirname, 'proxy.js')], {
-    detached: true,
-    stdio: ['ignore', logfd, logfd],
-    windowsHide: true,
+async function ping(timeoutMs) {
+  try {
+    const r = await fetch('http://localhost/__cc_ping', { unix: SOCK, signal: AbortSignal.timeout(timeoutMs) });
+    return r.status === 200;
+  } catch { return false; }
+}
+
+(async () => {
+  if (await ping(800)) process.exit(0); // already running
+
+  // Nothing answered. Remove a stale socket file so Bun.serve can bind (Bun does not
+  // auto-unlink; a leftover file from a dead proxy would otherwise cause EADDRINUSE).
+  try { fs.rmSync(SOCK, { force: true }); } catch { /* ignore */ }
+
+  // Launch the proxy fully detached. Bun.spawn+unref does NOT survive parent exit on
+  // Windows, so we hand off to a tiny Node shim (Node's detached spawn does survive).
+  // process.execPath is bun.exe — pass it so the shim runs the proxy under Bun.
+  const node = process.env.CC_NODE || 'node';
+  Bun.spawnSync({
+    cmd: [node, path.join(__dirname, 'spawn-proxy.js'), process.execPath],
+    stdin: 'ignore', stdout: 'ignore', stderr: 'inherit',
+    env: process.env,
   });
-  child.unref();
-  // Verify it actually bound. On macOS/Linux, port 443 is privileged and the spawn
-  // may die immediately with EACCES — catch that here instead of launching claude
-  // against a dead proxy.
-  setTimeout(() => {
-    const check = net.connect({ host: HOST, port: PORT });
-    check.setTimeout(600);
-    const fail = () => {
-      check.destroy();
-      console.error(`ensure-proxy: proxy did not come up on ${HOST}:${PORT}.`);
-      if (process.platform !== 'win32' && PORT < 1024) {
-        console.error('Port 443 is privileged on macOS/Linux — see README "Port 443 on macOS/Linux".');
-      }
-      console.error('See proxy-stdout.log for the underlying error.');
-      process.exit(1);
-    };
-    check.on('connect', () => { check.destroy(); process.exit(0); });
-    check.on('timeout', fail);
-    check.on('error', fail);
-  }, 700);
-};
 
-sock.on('timeout', () => { sock.destroy(); startProxy(); });
-sock.on('error', () => { startProxy(); });
+  for (let i = 0; i < 25; i++) {           // up to ~5s
+    await Bun.sleep(200);
+    if (await ping(500)) process.exit(0);
+  }
+  console.error('ensure-proxy: proxy did not come up on ' + SOCK + ' — see proxy-stdout.log / proxy.log');
+  process.exit(1);
+})();

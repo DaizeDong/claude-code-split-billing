@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Claude Code via a custom inference gateway, with Remote Control still working.
-# Isolated config + local rerouting proxy + (optional) corporate CA trust.
+# Claude Code via a custom inference gateway, with Remote Control still working -
+# isolated so plain `claude` is unaffected. Inference is billed to your gateway; the
+# account/OAuth control plane (incl. Remote Control) still talks to real Anthropic.
 # All args are forwarded to claude, e.g.:  cc --resume   |   cc --dangerously-skip-permissions
 set -euo pipefail
 
@@ -14,74 +15,53 @@ done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# --- resolve a Node.js >= 18 for the local proxy ---
-# Claude Code bundles its own runtime; this is only for src/proxy.js + ensure-proxy.js.
-# Override by exporting NODE_BIN=/path/to/node (useful when the default `node` is too old,
-# e.g. a system/conda Node 12). Otherwise we try `node` then common install locations.
-node_major() { "$1" -e 'process.stdout.write(process.versions.node.split(".")[0])' 2>/dev/null; }
-resolve_node() {
-  local c m
-  for c in ${NODE_BIN:+"$NODE_BIN"} node \
-           "$HOME"/.nvm/versions/node/*/bin/node \
-           /usr/local/bin/node /opt/homebrew/bin/node /usr/bin/node; do
-    command -v "$c" >/dev/null 2>&1 || [ -x "$c" ] || continue
-    m="$(node_major "$c")" || continue
-    if [ -n "$m" ] && [ "$m" -ge 18 ] 2>/dev/null; then printf '%s' "$c"; return 0; fi
-  done
-  return 1
-}
-if ! NODE_BIN="$(resolve_node)"; then
-  echo "cc: need Node.js >= 18 to run the local proxy." >&2
-  echo "    Install Node >= 18, or export NODE_BIN=/path/to/node and retry." >&2
+# --- Bun is required: Claude Code's ANTHROPIC_UNIX_SOCKET transport uses Bun's
+#     fetch({unix}) over an AF_UNIX socket, so the proxy runs under Bun. ---
+if ! command -v bun >/dev/null 2>&1; then
+  echo "cc: Bun is required for the local proxy. Install it once, then retry:" >&2
+  echo "       npm i -g bun      (or: curl -fsSL https://bun.sh/install | bash)" >&2
   exit 1
 fi
 
-# --- config dir ---
-# setup-config.sh records the chosen dir in .cc-config-dir: an isolated dir by default, or
-# your real ~/.claude in --inherit mode (shared login/plugins/skills/sessions/MCP/settings).
-# An explicit CLAUDE_CONFIG_DIR in the environment always wins.
+# --- config dir: inherit your real ~/.claude by default so Remote Control can read
+#     your stored OAuth login. Pointer written by setup-config; env var always wins. ---
 if [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then
   if [ -f "$REPO_ROOT/.cc-config-dir" ]; then
     CLAUDE_CONFIG_DIR="$(cat "$REPO_ROOT/.cc-config-dir")"
   else
-    CLAUDE_CONFIG_DIR="$REPO_ROOT/.claude-config"
+    CLAUDE_CONFIG_DIR="$HOME/.claude"
   fi
 fi
 export CLAUDE_CONFIG_DIR
 
-# --- ensure OAuth auth (an api key/token would disable Remote Control) ---
+# --- clear API-key style auth (would change auth mode / disable Remote Control) ---
 unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_CUSTOM_HEADERS \
       ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
       ANTHROPIC_DEFAULT_HAIKU_MODEL 2>/dev/null || true
 
-# --- MITM mode: point the client at the REAL host so Remote Control's
-#     host===api.anthropic.com check passes; hosts hijack + local HTTPS proxy
-#     (self-signed leaf) reroute /v1/messages to the gateway. ---
-export PROXY_PORT="${PROXY_PORT:-443}"
-export ANTHROPIC_BASE_URL="https://api.anthropic.com"
+# --- short socket path (AF_UNIX sun_path is ~108 chars). Override with CC_SOCK. ---
+: "${CC_SOCK:=$HOME/.cc/cc.sock}"
+mkdir -p "$(dirname "$CC_SOCK")"
 
-# --- trust the local CA that signs our api.anthropic.com leaf (required). ---
-if [ -f "$REPO_ROOT/ca-bundle.pem" ]; then
-  export NODE_EXTRA_CA_CERTS="$REPO_ROOT/ca-bundle.pem"
-else
-  echo "cc: missing ca-bundle.pem. Run:  bash scripts/gen-certs.sh" >&2
+# --- socket mode: turns Remote Control on (bypasses the host check) AND sends all API
+#     traffic over the socket to our proxy. http:// => plain HTTP on the socket, so no
+#     TLS and no certificate are needed. ---
+export ANTHROPIC_UNIX_SOCKET="$CC_SOCK"
+export ANTHROPIC_BASE_URL="http://api.anthropic.com"
+
+# --- the inference SDK in socket mode needs an OAuth token present to resolve an auth
+#     method. It is NOT sent upstream (the proxy authenticates); it's a local marker. ---
+CLAUDE_CODE_OAUTH_TOKEN="$(bun "$REPO_ROOT/src/read-oauth.js")"
+if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+  echo "cc: no Claude OAuth login found in $CLAUDE_CONFIG_DIR." >&2
+  echo "    Sign in once with plain  claude  (run /login), then retry cc." >&2
   exit 1
 fi
-
-# --- verify the hosts hijack is active (Windows path shown; on *nix check /etc/hosts). ---
-HOSTS_FILE="${HOSTS_FILE:-/c/Windows/System32/drivers/etc/hosts}"
-[ -f "$HOSTS_FILE" ] || HOSTS_FILE=/etc/hosts
-if ! grep -q "cc-split-billing" "$HOSTS_FILE" 2>/dev/null; then
-  echo "cc: api.anthropic.com is NOT hijacked to 127.0.0.1." >&2
-  echo "    Enable it once (Administrator/root):" >&2
-  echo "      Windows:     powershell -ExecutionPolicy Bypass -File scripts/hosts-hijack.ps1 enable" >&2
-  echo "      macOS/Linux: sudo scripts/hosts-hijack.sh enable" >&2
-  exit 1
-fi
+export CLAUDE_CODE_OAUTH_TOKEN
+export CLAUDE_CODE_OAUTH_SCOPES="$(bun "$REPO_ROOT/src/read-oauth.js" scopes)"
 
 # --- make sure the rerouting proxy is running; start it if not ---
-# ensure-proxy.js spawns proxy.js via process.execPath, so it inherits this same Node.
-"$NODE_BIN" "$REPO_ROOT/src/ensure-proxy.js"
+bun "$REPO_ROOT/src/ensure-proxy.js"
 
 # --- launch claude with all passed-through args (RC on by default via settings.json) ---
 exec claude "$@"
